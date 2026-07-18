@@ -1,0 +1,91 @@
+mod checks;
+mod transfer;
+
+use checks::checked_total;
+use transfer::build_values;
+
+struct Inner {
+    values: list<u16>;
+}
+
+struct Report {
+    marker: u64;
+    inner: Inner;
+}
+
+impl Report {
+    fn count(self: &Self) -> u64 {
+        return self.inner.values.len();
+    }
+
+    fn marker(self: &Self) -> u64 {
+        return self.marker;
+    }
+}
+
+enum Payload {
+    Empty,
+    Values(list<u64>),
+}
+
+fn consume(payload: Payload) -> u64 {
+    return match payload {
+        Payload::Empty => 0u64,
+        Payload::Values(values) => values.len(),
+    };
+}
+
+fn main() {
+    let seed: u64 = runtime_seed();
+
+    let title: string = "Aziky λ🙂";
+    if title.char_count() != 8u64 {
+        exit(10u64);
+    }
+
+    let mut scores: map<u64, u16> = {};
+    let key: u64 = seed & 7u64;
+    scores.set(key, 11u16);
+    scores.set(key + 1u64, 13u16);
+    scores.set(key + 2u64, 17u16);
+    scores.set(key + 3u64, 19u16);
+    scores.set(key + 4u64, 23u16);
+    if scores.len() != 5u64 {
+        exit(11u64);
+    }
+    let score: Option<u16> = scores.get(key + 2u64);
+    if score.unwrap_or(0u16) != 17u16 {
+        exit(12u64);
+    }
+
+    let values: list<u64> = build_values(20000u64);
+    if values[19999u64] != 19999u64 {
+        exit(13u64);
+    }
+    let payload: Payload = Payload::Values(values);
+    if consume(payload) != 20000u64 {
+        exit(14u64);
+    }
+
+    let report: Report = Report {
+        marker: 42u64,
+        inner: Inner { values: [2u16, 4u16, 6u16] },
+    };
+    if report.count() != 3u64 {
+        exit(15u64);
+    }
+    if report.marker() != 42u64 {
+        exit(16u64);
+    }
+
+    let checked: Result<u64, u8> = checked_total(40u64, 2u64);
+    let total: u64 = match checked {
+        Result::Ok(value) => value,
+        Result::Err(_) => 0u64,
+    };
+    if total != 42u64 {
+        exit(17u64);
+    }
+
+    exit(seed & 0u64);
+}

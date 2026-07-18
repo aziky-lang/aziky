@@ -1,0 +1,11 @@
+[package]
+name = "conflict_app"
+version = "0.1.0"
+entry = "src/main.azk"
+
+[features]
+default = []
+
+[dependencies]
+first = { package = "shared", version = "1.0.0", checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+second = { package = "shared", version = "2.0.0", checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }

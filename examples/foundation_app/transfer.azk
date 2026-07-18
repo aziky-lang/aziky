@@ -1,0 +1,7 @@
+pub fn build_values(limit: u64) -> list<u64> {
+    let mut values: list<u64> = [];
+    for value in 0u64..limit {
+        values.push(value);
+    }
+    return values;
+}

@@ -1,0 +1,17 @@
+[package]
+name = "aziky"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Yassine Azily"]
+description = "A deterministic, zero-dependency compiler toolchain for the Aziky programming language"
+license = "MIT AND Apache-2.0"
+readme = "README.md"
+homepage = "https://github.com/aziky-lang/aziky"
+repository = "https://github.com/aziky-lang/aziky"
+documentation = "https://github.com/aziky-lang/aziky/tree/main/docs"
+keywords = ["compiler", "programming-language", "x86-64", "elf", "deterministic"]
+categories = ["compilers", "command-line-utilities", "development-tools"]
+publish = false
+
+[dependencies]

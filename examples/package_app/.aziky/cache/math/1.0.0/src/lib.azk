@@ -1,0 +1,6 @@
+mod base;
+use base::seed;
+
+pub fn answer() -> u64 {
+    return seed() + 1u64;
+}

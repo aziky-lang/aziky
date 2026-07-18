@@ -1,0 +1,27 @@
+pub struct AzikyVersion {
+    major: u16;
+    minor: u16;
+    patch: u16;
+}
+
+impl AzikyVersion {
+    fn current() -> Self {
+        return Self { major: 0u16, minor: 1u16, patch: 0u16 };
+    }
+
+    fn is_compatible(self: &Self, required_major: u16) -> bool {
+        return self.major == required_major;
+    }
+
+    fn to_string(self: &Self) -> string {
+        return self.major.to_str() + "." + self.minor.to_str() + "." + self.patch.to_str();
+    }
+}
+
+pub fn version() -> AzikyVersion {
+    return AzikyVersion::current();
+}
+
+pub fn stdlib_abi_version() -> u64 {
+    return runtime_stdlib_abi_version();
+}

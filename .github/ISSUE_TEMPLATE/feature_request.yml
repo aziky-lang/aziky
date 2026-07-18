@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused language, toolchain, library, or platform change
+title: "[Proposal]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete developer problem should Aziky solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed contract
+      description: Describe syntax, behavior, diagnostics, portability, and compatibility.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Explain positive, negative, deterministic, and target-specific tests.
+    validations:
+      required: true

@@ -1,0 +1,4 @@
+fn main() {
+    print("Aziky portable target\n");
+    exit(82u64);
+}

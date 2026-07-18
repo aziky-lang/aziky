@@ -1,0 +1,44 @@
+name: Bug report
+description: Report reproducible incorrect Aziky behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here; follow SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest source file and exact commands needed.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Aziky revision
+      placeholder: commit SHA or release version
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Rust version, target triple, and relevant tools.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Complete output
+      render: text
+    validations:
+      required: true

@@ -1,0 +1,10 @@
+// benchmark-contract: lcg32;seed=123456789;iterations=50000000;mul=1664525;add=1013904223
+fn main() {
+    let mut state: u64 = 123456789u64;
+    let mut i: u64 = 0u64;
+    while i < 50000000u64 {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        i = i + 1u64;
+    }
+    exit(state & 127u64);
+}

@@ -1,0 +1,26 @@
+// Native filesystem facade. The compiler lowers these functions through the
+// same File ownership ABI as direct inherent calls; no host library is used.
+
+pub fn create(path: string) -> File {
+    let file: File = File::create(path);
+    return file;
+}
+
+pub fn open_read(path: string) -> File {
+    let file: File = File::open_read(path);
+    return file;
+}
+
+pub fn write_all(file: &File, text: string) -> u64 {
+    let written: u64 = file.write_all(text);
+    return written;
+}
+
+pub fn read(file: &File, max_bytes: u64) -> string {
+    let content: string = file.read(max_bytes);
+    return content;
+}
+
+pub fn close(file: File) {
+    file.close();
+}

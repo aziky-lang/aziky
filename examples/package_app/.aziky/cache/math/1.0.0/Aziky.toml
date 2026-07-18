@@ -1,0 +1,10 @@
+[package]
+name = "math"
+version = "1.0.0"
+entry = "src/lib.azk"
+
+[features]
+default = []
+
+[dependencies]
+base = { version = "1.0.0", checksum = "sha256:1ee3320b0dea206900dfd0d1677c9115d9745b22adeb91fc5a0b3cb4b2250402" }

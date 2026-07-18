@@ -1,0 +1,9 @@
+mod base;
+use base::seed;
+
+fn main() {
+    if seed() == 40u64 {
+        exit(0u64);
+    }
+    exit(1u64);
+}

@@ -1,0 +1,52 @@
+mod std;
+
+use std::argument;
+use std::argument_count;
+use std::environment_count;
+use std::environment_entry;
+use std::is_path_separator;
+use std::monotonic_nanos;
+use std::path_separator;
+use std::process_id;
+use std::wall_time_nanos;
+
+fn main() {
+    let arguments: u64 = argument_count();
+    if arguments != 2u64 {
+        exit(120u64);
+    }
+    let mode: string = argument(1u64);
+    if mode.len() != 7u64 {
+        exit(121u64);
+    }
+
+    let environment_entries: u64 = environment_count();
+    if environment_entries == 0u64 {
+        exit(122u64);
+    }
+    let first_environment_entry: string = environment_entry(0u64);
+    if first_environment_entry.len() == 0u64 {
+        exit(123u64);
+    }
+
+    let first_tick: u64 = monotonic_nanos();
+    let second_tick: u64 = monotonic_nanos();
+    if second_tick < first_tick {
+        exit(124u64);
+    }
+    let wall_time: u64 = wall_time_nanos();
+    if wall_time == 0u64 {
+        exit(125u64);
+    }
+    let process: u64 = process_id();
+    if process == 0u64 {
+        exit(126u64);
+    }
+
+    let separator: char = path_separator();
+    let separator_is_valid: bool = is_path_separator(separator);
+    if separator_is_valid == false {
+        exit(127u64);
+    }
+    exit(0u64);
+}

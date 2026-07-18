@@ -1,0 +1,39 @@
+// benchmark-contract: binary-search;seed=123456789;queries=5000000;values=even-0..126;algorithm=lower-bound
+fn main() {
+    let values: [u64; 64] = [
+        0u64, 2u64, 4u64, 6u64, 8u64, 10u64, 12u64, 14u64,
+        16u64, 18u64, 20u64, 22u64, 24u64, 26u64, 28u64, 30u64,
+        32u64, 34u64, 36u64, 38u64, 40u64, 42u64, 44u64, 46u64,
+        48u64, 50u64, 52u64, 54u64, 56u64, 58u64, 60u64, 62u64,
+        64u64, 66u64, 68u64, 70u64, 72u64, 74u64, 76u64, 78u64,
+        80u64, 82u64, 84u64, 86u64, 88u64, 90u64, 92u64, 94u64,
+        96u64, 98u64, 100u64, 102u64, 104u64, 106u64, 108u64, 110u64,
+        112u64, 114u64, 116u64, 118u64, 120u64, 122u64, 124u64, 126u64
+    ];
+    let mut state: u64 = 123456789u64;
+    let mut hits: u64 = 0u64;
+    let mut i: u64 = 0u64;
+
+    while i < 5000000u64 {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let target: u64 = state & 127u64;
+        let mut low: u64 = 0u64;
+        let mut high: u64 = 64u64;
+        while low < high {
+            let middle: u64 = low + ((high - low) >> 1u8);
+            if values[middle] < target {
+                low = middle + 1u64;
+            } else {
+                high = middle;
+            }
+        }
+        if low < 64u64 {
+            if values[low] == target {
+                hits = hits + 1u64;
+            }
+        }
+        i = i + 1u64;
+    }
+
+    exit((state ^ hits) & 127u64);
+}

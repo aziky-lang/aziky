@@ -1,0 +1,10 @@
+// Argument values are host-dependent; the count is captured directly from the
+// immutable Linux process-entry stack.
+pub fn argument_count() -> u64 {
+    return runtime_arg_count();
+}
+
+pub fn argument(index: u64) -> string {
+    let value: string = runtime_argument(index);
+    return value;
+}

@@ -1,0 +1,101 @@
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+enum BuildMode { Debug, Release }
+
+fn helper() {
+    print("helper\n");
+}
+
+fn main() {
+    let greeting: string = "Hello" + " from " + "aziky" + "!\n";
+    let code: u8 = 0;
+    let pi: f32 = 3.14159f32;
+    let mode: BuildMode = BuildMode::Debug;
+    let text_num: string = "256";
+    let parsed: i32 = text_num.to_i32();
+    let parsed_text: string = parsed.to_str();
+    let flag: bool = "true".to_bool();
+    let padded: string = "  aziky systems  ";
+    let mut i: u8 = 0;
+    let arr: [u8; 3] = [1u8, 2u8, 3u8];
+    let dict: dict<string, i32> = {"alpha": 5i32, "beta": 9i32, "gamma": 13i32};
+    let mut sum_acc: i64 = 0i64;
+    let mut min_acc: i64 = 0i64;
+    let mut max_acc: i64 = 0i64;
+    let p: Point = Point { x: 7i32, y: 9i32 };
+
+    while i < 3u8 {
+        print("loop\n");
+        i = i + 1u8;
+    }
+
+    for j in 0u8..4u8 {
+        if j == 1u8 {
+            continue;
+        }
+        print("for\n");
+    }
+
+    foreach key in dict {
+        print("key=");
+        print(key);
+        print("\n");
+    }
+
+    parfor worker in 0u8..4u8 {
+        print("parfor=");
+        print(worker.to_str());
+        print("\n");
+    }
+
+    parfor n in 1i64..6i64 reduce sum into sum_acc { n };
+    parfor n in -2i64..3i64 reduce min into min_acc { n };
+    parfor n in -2i64..3i64 reduce max into max_acc { n };
+
+    loop {
+        print("loop-once\n");
+        break;
+    }
+
+    if mode == BuildMode::Debug {
+        print("debug-mode\n");
+    } else if mode == BuildMode::Release {
+        print("release-mode\n");
+    } else {
+        print("unknown-mode\n");
+    }
+
+    assert(dict.len() == 3u64, "dict size check failed");
+    assert(dict["alpha"] == 5i32);
+
+    helper();
+    print(greeting);
+    print(parsed_text);
+    print("\n");
+    print(flag.to_str());
+    print("\n");
+    print(padded.trim().to_upper());
+    print("\n");
+    print(arr.len());
+    print("\n");
+    print(dict["beta"]);
+    print("\n");
+    print(sum_acc.to_str());
+    print("\n");
+    print(min_acc.to_str());
+    print("\n");
+    print(max_acc.to_str());
+    print("\n");
+    print(mode.to_str());
+    print("\n");
+    print(pi);
+    print("\n");
+    print(arr[1u8]);
+    print("\n");
+    print(p.x);
+    print("\n");
+    exit(code);
+}

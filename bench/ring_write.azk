@@ -1,0 +1,23 @@
+// benchmark-contract: ring-write;seed=123456789;iterations=50000000;words=64;value=state32x2
+fn main() {
+    let mut state: u64 = 123456789u64;
+    let mut buf: [u64; 64] = [
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64
+    ];
+    let mask: u64 = 63u64;
+    let mut i: u64 = 0u64;
+    while i < 50000000u64 {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let idx: u64 = i & mask;
+        buf[idx] = (state << 32u8) | state;
+        i = i + 1u64;
+    }
+    exit((((state << 32u8) | state) ^ buf[0u8]) & 127u64);
+}

@@ -1,0 +1,22 @@
+{
+  "Main function": {
+    "prefix": "main",
+    "body": ["fn main() {", "    ${1}", "}"],
+    "description": "Create an Aziky entry function"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2})${3: -> ${4:u64}} {", "    ${5}", "}"],
+    "description": "Create an Aziky function"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name} {", "    ${2:field}: ${3:u64},", "}"],
+    "description": "Create an Aziky struct"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": ["match ${1:value} {", "    ${2:Variant} => ${3:value},", "}"],
+    "description": "Create an Aziky match expression"
+  }
+}

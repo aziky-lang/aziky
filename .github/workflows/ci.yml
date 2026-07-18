@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    name: Compiler and release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils llvm ripgrep
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+      - name: Repository hygiene
+        run: scripts/check_repository_hygiene.sh
+      - name: Documentation links
+        run: python3 scripts/check_markdown_links.py
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Compiler tests
+        run: cargo test --locked --offline
+      - name: Release build
+        run: cargo build --release --locked --offline
+      - name: Release gate
+        run: scripts/run_release_gate.sh --allow-dirty
+
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Test extension
+        run: npm test
+      - name: Package extension
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aziky-vscode-extension
+          path: editors/vscode/dist/*.vsix
+          if-no-files-found: error
+
+  windows-host:
+    name: Windows compiler host
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.88
+        shell: pwsh
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Build compiler offline
+        run: cargo build --locked --offline
+      - name: Run portable compiler tests
+        run: cargo test --locked --offline
+
+  macos-native:
+    name: Native macOS x86-64 gate
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Run native Darwin gate
+        run: scripts/run_macos_x86_64_gate.sh

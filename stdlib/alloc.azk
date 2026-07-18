@@ -1,0 +1,24 @@
+pub fn new_i32_list() -> list<i32> {
+    let values: list<i32> = [];
+    return values;
+}
+
+pub fn new_u64_list() -> list<u64> {
+    let values: list<u64> = [];
+    return values;
+}
+
+pub fn new_string_list() -> list<string> {
+    let values: list<string> = [];
+    return values;
+}
+
+pub fn new_string_map() -> map<string, string> {
+    let values: map<string, string> = {};
+    return values;
+}
+
+pub fn new_u64_map() -> map<string, u64> {
+    let values: map<string, u64> = {};
+    return values;
+}

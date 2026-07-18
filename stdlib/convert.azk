@@ -1,0 +1,88 @@
+pub fn checked_char_at(text: string, index: u64) -> Option<char> {
+    return text.char_at(index);
+}
+
+pub fn checked_char(value: u32) -> Option<char> {
+    return value.to_char_checked();
+}
+
+pub enum ParseError {
+    InvalidInput,
+}
+
+pub fn checked_i8(text: string) -> Result<i8, ParseError> {
+    let parsed: Result<i8, string> = text.parse_i8();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0i8)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_i16(text: string) -> Result<i16, ParseError> {
+    let parsed: Result<i16, string> = text.parse_i16();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0i16)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_i32(text: string) -> Result<i32, ParseError> {
+    let parsed: Result<i32, string> = text.parse_i32();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0i32)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_i64(text: string) -> Result<i64, ParseError> {
+    let parsed: Result<i64, string> = text.parse_i64();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0i64)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_u8(text: string) -> Result<u8, ParseError> {
+    let parsed: Result<u8, string> = text.parse_u8();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0u8)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_u16(text: string) -> Result<u16, ParseError> {
+    let parsed: Result<u16, string> = text.parse_u16();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0u16)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_u32(text: string) -> Result<u32, ParseError> {
+    let parsed: Result<u32, string> = text.parse_u32();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0u32)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_u64(text: string) -> Result<u64, ParseError> {
+    let parsed: Result<u64, string> = text.parse_u64();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0u64)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_f32(text: string) -> Result<f32, ParseError> {
+    let parsed: Result<f32, string> = text.parse_f32();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0.0f32)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_f64(text: string) -> Result<f64, ParseError> {
+    let parsed: Result<f64, string> = text.parse_f64();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(0.0f64)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}
+
+pub fn checked_bool(text: string) -> Result<bool, ParseError> {
+    let parsed: Result<bool, string> = text.parse_bool();
+    if parsed.is_ok() { return Result::Ok(parsed.unwrap_or(false)); }
+    let error: ParseError = ParseError::InvalidInput;
+    return Result::Err(error);
+}

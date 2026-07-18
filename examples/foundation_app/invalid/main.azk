@@ -1,0 +1,7 @@
+mod broken;
+use broken::invalid;
+
+fn main() {
+    print(invalid().to_str());
+    exit(0u64);
+}
