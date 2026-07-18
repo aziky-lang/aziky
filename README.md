@@ -15,7 +15,6 @@ linker (no LLVM).
 
 - Project name: **Aziky**
 - Repository: **[aziky-lang/aziky](https://github.com/aziky-lang/aziky)**
-- Creator and original author: **Yassine Azily**
 - License: **MIT AND Apache-2.0** (both licenses apply simultaneously)
 
 Aziky is developed with its [contributors](CONTRIBUTORS.md), and authorship is
