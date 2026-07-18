@@ -59,7 +59,7 @@ jobs:
         run: npm test
       - name: Package extension
         run: npm run package
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: aziky-vscode-extension
           path: editors/vscode/dist/*.vsix
