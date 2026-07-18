@@ -1,0 +1,11 @@
+pub fn round_trip(path: string, text: string) -> u64 {
+    let output: File = File::create(path);
+    let written: u64 = output.write_all(text);
+    output.close();
+
+    let verify_path: string = "platform-output.txt";
+    let input: File = File::open_read(verify_path);
+    let content: string = input.read(4096u64);
+    input.close();
+    return written + content.len();
+}

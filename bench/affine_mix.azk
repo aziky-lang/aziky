@@ -1,0 +1,11 @@
+// benchmark-contract: affine-mix;seed=123456789;iterations=50000000;mask=0x03ffffffffffffff
+fn main() {
+    let mut state: u64 = 123456789u64;
+    let mut i: u64 = 0u64;
+    while i < 50000000u64 {
+        state = ((state << 3u8) + i) & 288230376151711743u64;
+        state = ((state << 2u8) - 3u64) & 288230376151711743u64;
+        i = i + 1u64;
+    }
+    exit(state & 127u64);
+}

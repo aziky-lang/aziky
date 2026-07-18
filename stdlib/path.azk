@@ -1,0 +1,7 @@
+pub fn separator() -> char {
+    return '/';
+}
+
+pub fn is_separator(value: char) -> bool {
+    return value == '/';
+}

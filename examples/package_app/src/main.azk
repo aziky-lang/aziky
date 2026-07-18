@@ -1,0 +1,17 @@
+mod math;
+mod flavor;
+mod base;
+mod std;
+
+use math::answer;
+use flavor::adjustment;
+use base::seed;
+use std::process_id;
+
+fn main() {
+    let process: u64 = process_id();
+    if process == 0u64 {
+        exit(126u64);
+    }
+    exit(answer() + adjustment() + seed());
+}

@@ -1,0 +1,3 @@
+pub fn seed() -> u64 {
+    return 40u64;
+}

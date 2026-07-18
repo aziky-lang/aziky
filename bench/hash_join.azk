@@ -1,0 +1,270 @@
+// benchmark-contract: hash-join;seed=123456789;build=160;queries=500000;cap=256;bloom=64;group=16
+fn main() {
+    let mut state: u64 = 123456789u64;
+
+    let mut ctrl: [u64; 256] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+    let mut table_keys: [u64; 256] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+    let mut table_vals: [u64; 256] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+    let mut reducer_bloom: [u64; 64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+    let mut compact: [u64; 64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+
+    let build_rows: u64 = 160u64;
+    let total_queries: u64 = 500000u64;
+
+    let use_partitioned: bool = build_rows >= 128u64 && total_queries >= 200000u64;
+
+    let mut i: u64 = 0u64;
+    while i < build_rows {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let key_hi: u64 = state;
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let key: u64 = (key_hi << 32u8) | state;
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let val_hi: u64 = state;
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let val: u64 = (val_hi << 32u8) | state;
+
+        let mut b: u64 = 0u64;
+        while b < 4u64 {
+            let bit_idx: u64 = (key >> (b * 13u64)) & 4095u64;
+            let word: u64 = bit_idx >> 6u64;
+            let bit: u64 = bit_idx & 63u64;
+            reducer_bloom[word] = reducer_bloom[word] | (1u64 << bit);
+            b = b + 1u64;
+        }
+
+        let fp: u64 = ((key >> 57u64) & 127u64) + 1u64;
+        let mut inserted: u64 = 0u64;
+
+        if use_partitioned {
+            let part: u64 = (key >> 62u64) & 3u64;
+            let mut group: u64 = (key & 63u64) & 48u64;
+            let mut rounds: u64 = 0u64;
+
+            while rounds < 4u64 {
+                let mut lane: u64 = 0u64;
+                while lane < 16u64 {
+                    let idx: u64 = (part << 6u64) | ((group + lane) & 63u64);
+                    let c: u64 = ctrl[idx];
+                    if c == 0u64 {
+                        ctrl[idx] = fp;
+                        table_keys[idx] = key;
+                        table_vals[idx] = val;
+                        inserted = 1u64;
+                        break;
+                    }
+                    if c == fp {
+                        if table_keys[idx] == key {
+                            table_vals[idx] = val;
+                            inserted = 1u64;
+                            break;
+                        }
+                    }
+                    lane = lane + 1u64;
+                }
+                if inserted == 1u64 {
+                    break;
+                }
+                group = (group + 16u64) & 63u64;
+                rounds = rounds + 1u64;
+            }
+
+            if inserted == 0u64 {
+                let mut idx: u64 = (part << 6u64) | (key & 63u64);
+                let mut steps: u64 = 0u64;
+                while steps < 64u64 {
+                    let c: u64 = ctrl[idx];
+                    if c == 0u64 {
+                        ctrl[idx] = fp;
+                        table_keys[idx] = key;
+                        table_vals[idx] = val;
+                        inserted = 1u64;
+                        break;
+                    }
+                    if c == fp {
+                        if table_keys[idx] == key {
+                            table_vals[idx] = val;
+                            inserted = 1u64;
+                            break;
+                        }
+                    }
+                    idx = (part << 6u64) | ((idx + 1u64) & 63u64);
+                    steps = steps + 1u64;
+                }
+            }
+        } else {
+            let mut group: u64 = (key & 255u64) & 240u64;
+            let mut rounds: u64 = 0u64;
+
+            while rounds < 16u64 {
+                let mut lane: u64 = 0u64;
+                while lane < 16u64 {
+                    let idx: u64 = (group + lane) & 255u64;
+                    let c: u64 = ctrl[idx];
+                    if c == 0u64 {
+                        ctrl[idx] = fp;
+                        table_keys[idx] = key;
+                        table_vals[idx] = val;
+                        inserted = 1u64;
+                        break;
+                    }
+                    if c == fp {
+                        if table_keys[idx] == key {
+                            table_vals[idx] = val;
+                            inserted = 1u64;
+                            break;
+                        }
+                    }
+                    lane = lane + 1u64;
+                }
+                if inserted == 1u64 {
+                    break;
+                }
+                group = (group + 16u64) & 255u64;
+                rounds = rounds + 1u64;
+            }
+
+            if inserted == 0u64 {
+                let mut idx: u64 = key & 255u64;
+                let mut steps: u64 = 0u64;
+                while steps < 256u64 {
+                    let c: u64 = ctrl[idx];
+                    if c == 0u64 {
+                        ctrl[idx] = fp;
+                        table_keys[idx] = key;
+                        table_vals[idx] = val;
+                        inserted = 1u64;
+                        break;
+                    }
+                    if c == fp {
+                        if table_keys[idx] == key {
+                            table_vals[idx] = val;
+                            inserted = 1u64;
+                            break;
+                        }
+                    }
+                    idx = (idx + 1u64) & 255u64;
+                    steps = steps + 1u64;
+                }
+            }
+        }
+
+        i = i + 1u64;
+    }
+
+    let mut sum: u64 = 0u64;
+    let mut compact_len: u64 = 0u64;
+
+    let mut q: u64 = 0u64;
+    while q < total_queries {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let probe_hi: u64 = state;
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let probe_key: u64 = (probe_hi << 32u8) | state;
+
+        let mut maybe: u64 = 1u64;
+        let mut b: u64 = 0u64;
+        while b < 4u64 {
+            let bit_idx: u64 = (probe_key >> (b * 13u64)) & 4095u64;
+            let word: u64 = bit_idx >> 6u64;
+            let bit: u64 = bit_idx & 63u64;
+            if ((reducer_bloom[word] >> bit) & 1u64) == 0u64 {
+                maybe = 0u64;
+                break;
+            }
+            b = b + 1u64;
+        }
+
+        if maybe == 1u64 {
+            let fp: u64 = ((probe_key >> 57u64) & 127u64) + 1u64;
+            let mut found: u64 = 0u64;
+
+            if use_partitioned {
+                let part: u64 = (probe_key >> 62u64) & 3u64;
+                let mut group: u64 = (probe_key & 63u64) & 48u64;
+                let mut rounds: u64 = 0u64;
+
+                while rounds < 4u64 {
+                    let mut lane: u64 = 0u64;
+                    while lane < 16u64 {
+                        let idx: u64 = (part << 6u64) | ((group + lane) & 63u64);
+                        let c: u64 = ctrl[idx];
+                        if c == 0u64 {
+                            rounds = 4u64;
+                            break;
+                        }
+                        if c == fp {
+                            if table_keys[idx] == probe_key {
+                                compact[compact_len] = table_vals[idx];
+                                compact_len = compact_len + 1u64;
+                                if compact_len == 64u64 {
+                                    let mut f: u64 = 0u64;
+                                    while f < 64u64 {
+                                        sum = sum ^ compact[f];
+                                        f = f + 1u64;
+                                    }
+                                    compact_len = 0u64;
+                                }
+                                found = 1u64;
+                                break;
+                            }
+                        }
+                        lane = lane + 1u64;
+                    }
+                    if found == 1u64 {
+                        break;
+                    }
+                    group = (group + 16u64) & 63u64;
+                    rounds = rounds + 1u64;
+                }
+            } else {
+                let mut group: u64 = (probe_key & 255u64) & 240u64;
+                let mut rounds: u64 = 0u64;
+
+                while rounds < 16u64 {
+                    let mut lane: u64 = 0u64;
+                    while lane < 16u64 {
+                        let idx: u64 = (group + lane) & 255u64;
+                        let c: u64 = ctrl[idx];
+                        if c == 0u64 {
+                            rounds = 16u64;
+                            break;
+                        }
+                        if c == fp {
+                            if table_keys[idx] == probe_key {
+                                compact[compact_len] = table_vals[idx];
+                                compact_len = compact_len + 1u64;
+                                if compact_len == 64u64 {
+                                    let mut f: u64 = 0u64;
+                                    while f < 64u64 {
+                                        sum = sum ^ compact[f];
+                                        f = f + 1u64;
+                                    }
+                                    compact_len = 0u64;
+                                }
+                                found = 1u64;
+                                break;
+                            }
+                        }
+                        lane = lane + 1u64;
+                    }
+                    if found == 1u64 {
+                        break;
+                    }
+                    group = (group + 16u64) & 255u64;
+                    rounds = rounds + 1u64;
+                }
+            }
+        }
+
+        q = q + 1u64;
+    }
+
+    let mut f: u64 = 0u64;
+    while f < compact_len {
+        sum = sum ^ compact[f];
+        f = f + 1u64;
+    }
+
+    exit(sum & 127u64);
+}

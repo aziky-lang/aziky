@@ -1,0 +1,4 @@
+pub fn invalid() -> u64 {
+    let value: u64 = true;
+    return value;
+}

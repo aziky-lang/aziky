@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Aziky Yaz mark">
+  <rect x="2" y="2" width="60" height="60" rx="13" fill="#111a27"/>
+  <g fill="none" stroke="#ff3b24" stroke-width="7" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="m16 10 16 16 16-16"/>
+    <path d="M32 12v40"/>
+    <path d="m16 55 16-16 16 16"/>
+  </g>
+  <path d="M11 53.5 53 11.5" fill="none" stroke="#111a27" stroke-width="2.2" stroke-linecap="square"/>
+</svg>

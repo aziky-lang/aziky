@@ -1,0 +1,9 @@
+mod math;
+use math::answer;
+
+fn main() {
+    if answer() == 41u64 {
+        exit(0u64);
+    }
+    exit(1u64);
+}

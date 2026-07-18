@@ -1,0 +1,4 @@
+fn main() {
+    print("intentional failure");
+    exit(7u64);
+}

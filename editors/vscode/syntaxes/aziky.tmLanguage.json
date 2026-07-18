@@ -1,0 +1,146 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Aziky",
+  "scopeName": "source.aziky",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#characters" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#function-calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#invalid" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.aziky",
+          "begin": "//",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.aziky" } },
+          "end": "$"
+        },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.aziky",
+      "begin": "/\\*",
+      "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.aziky" } },
+      "end": "\\*/",
+      "endCaptures": { "0": { "name": "punctuation.definition.comment.end.aziky" } },
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "strings": {
+      "name": "string.quoted.double.aziky",
+      "begin": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.aziky" } },
+      "end": "\"|$",
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.aziky" } },
+      "patterns": [
+        { "name": "constant.character.escape.aziky", "match": "\\\\(?:[nt\"\\\\])" },
+        { "name": "invalid.illegal.escape.aziky", "match": "\\\\." }
+      ]
+    },
+    "characters": {
+      "name": "string.quoted.single.aziky",
+      "begin": "'",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.aziky" } },
+      "end": "'|$",
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.aziky" } },
+      "patterns": [
+        { "name": "constant.character.escape.aziky", "match": "\\\\(?:[nrt0'\"\\\\])" },
+        { "name": "invalid.illegal.escape.aziky", "match": "\\\\." }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.aziky" },
+            "2": { "name": "entity.name.function.aziky" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.aziky" },
+            "2": { "name": "entity.name.type.aziky" }
+          }
+        },
+        {
+          "match": "\\b(mod)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import.aziky" },
+            "2": { "name": "entity.name.namespace.aziky" }
+          }
+        },
+        {
+          "match": "\\b(let)\\s+(mut\\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.aziky" },
+            "2": { "name": "storage.modifier.aziky" },
+            "3": { "name": "variable.other.readwrite.aziky" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "storage.type.aziky", "match": "\\b(?:fn|struct|enum|trait|impl|let)\\b" },
+        { "name": "storage.modifier.aziky", "match": "\\b(?:pub|mut|embed)\\b" },
+        { "name": "keyword.control.import.aziky", "match": "\\b(?:mod|use|as)\\b" },
+        { "name": "keyword.control.conditional.aziky", "match": "\\b(?:if|else|match)\\b" },
+        { "name": "keyword.control.loop.aziky", "match": "\\b(?:while|loop|for|parfor|foreach|in|break|continue|benchloop)\\b" },
+        { "name": "keyword.control.return.aziky", "match": "\\breturn\\b" },
+        { "name": "support.function.builtin.aziky", "match": "\\b(?:assert|panic|print|exit)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "support.type.primitive.aziky", "match": "\\b(?:u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|usize|isize|f32|f64|bool|byte|char|string|dict|list|map)\\b" },
+        { "name": "support.type.aziky", "match": "\\b(?:Path|File|Thread)\\b" }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.aziky", "match": "\\b(?:true|false)\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.aziky", "match": "\\b[0-9]+\\.[0-9]+(?:f32|f64)?\\b" },
+        { "name": "constant.numeric.integer.aziky", "match": "\\b[0-9]+(?:u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|usize|isize)?\\b" },
+        { "name": "invalid.illegal.numeric.aziky", "match": "\\b[0-9]+(?:\\.[0-9]+)?[A-Za-z0-9]+\\b" }
+      ]
+    },
+    "function-calls": {
+      "patterns": [
+        { "name": "entity.name.function.call.aziky", "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()" },
+        { "name": "entity.name.function.call.aziky", "match": "(?<=\\.)[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()" }
+      ]
+    },
+    "operators": {
+      "name": "keyword.operator.aziky",
+      "match": "(?:==|!=|<=|>=|&&|\\|\\||<<|>>|=>|::|\\.\\.|[+\\-*/%&|^!<>=])"
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.section.block.aziky", "match": "[{}]" },
+        { "name": "punctuation.section.group.aziky", "match": "[()]" },
+        { "name": "punctuation.section.brackets.aziky", "match": "[\\[\\]]" },
+        { "name": "punctuation.separator.aziky", "match": "[,;:.]" }
+      ]
+    },
+    "invalid": {
+      "name": "invalid.illegal.character.aziky",
+      "match": "[^\\sA-Za-z0-9_(){}\\[\\];:,.=+*/%&|^!<>\"'\\-]"
+    }
+  }
+}

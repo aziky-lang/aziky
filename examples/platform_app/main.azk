@@ -1,0 +1,11 @@
+mod storage;
+mod std;
+
+use storage::round_trip;
+
+fn main() {
+    let path: string = "platform-output.txt";
+    let text: string = "Aziky platform";
+    let count: u64 = round_trip(path, text);
+    exit(count);
+}

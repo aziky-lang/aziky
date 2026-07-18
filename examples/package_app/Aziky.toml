@@ -1,0 +1,12 @@
+[package]
+name = "package_app"
+version = "0.1.0"
+entry = "src/main.azk"
+
+[features]
+default = ["dep:flavor"]
+
+[dependencies]
+math = { version = "1.0.0", checksum = "sha256:2e8685b3113f117473a31b347d01d2e087182f8aec4e68f21ddd3f552cc0eef5" }
+base = { version = "1.0.0", checksum = "sha256:1ee3320b0dea206900dfd0d1677c9115d9745b22adeb91fc5a0b3cb4b2250402" }
+flavor = { version = "1.0.0", checksum = "sha256:bc96a89aefc1f436781fa7a98fde157a1bf8b0c5862bab65be35449c7b928f80", optional = true }

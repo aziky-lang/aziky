@@ -1,0 +1,37 @@
+pub enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+pub fn ordering_is_less(value: Ordering) -> bool {
+    return value == Ordering::Less;
+}
+
+pub fn ordering_is_equal(value: Ordering) -> bool {
+    return value == Ordering::Equal;
+}
+
+pub fn ordering_is_greater(value: Ordering) -> bool {
+    return value == Ordering::Greater;
+}
+
+pub fn compare_i64(left: i64, right: i64) -> Ordering {
+    if left < right {
+        return Ordering::Less;
+    }
+    if left > right {
+        return Ordering::Greater;
+    }
+    return Ordering::Equal;
+}
+
+pub fn compare_u64(left: u64, right: u64) -> Ordering {
+    if left < right {
+        return Ordering::Less;
+    }
+    if left > right {
+        return Ordering::Greater;
+    }
+    return Ordering::Equal;
+}

@@ -1,0 +1,10 @@
+fn main() {
+    let channel: Channel<u64> = Channel::unbounded();
+    let sender: Sender<u64> = channel.sender();
+    let receiver: Receiver<u64> = channel.receiver();
+    sender.send(29u64);
+    let value: u64 = receiver.recv();
+    sender.close();
+    receiver.close();
+    exit(value);
+}

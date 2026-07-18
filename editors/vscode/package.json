@@ -1,0 +1,131 @@
+{
+  "name": "aziky-language",
+  "displayName": "Aziky Language Support",
+  "description": "Compiler-backed VS Code language support for Aziky.",
+  "version": "0.1.1",
+  "publisher": "aziky",
+  "author": "Yassine Azily",
+  "license": "MIT AND Apache-2.0",
+  "homepage": "https://github.com/aziky-lang/aziky/tree/main/editors/vscode#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aziky-lang/aziky.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/aziky-lang/aziky/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "keywords": [
+    "aziky",
+    "azk"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:aziky",
+    "onCommand:aziky.checkDocument"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Aziky language support executes the configured local compiler."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "aziky",
+        "aliases": [
+          "Aziky",
+          "aziky"
+        ],
+        "extensions": [
+          ".azk"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/aziky-yaz-light.svg",
+          "dark": "./icons/aziky-yaz-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "aziky",
+        "scopeName": "source.aziky",
+        "path": "./syntaxes/aziky.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "aziky",
+        "path": "./snippets/aziky.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "aziky.checkDocument",
+        "title": "Aziky: Check Current Document"
+      },
+      {
+        "command": "aziky.restartTooling",
+        "title": "Aziky: Restart Language Tooling"
+      }
+    ],
+    "configuration": {
+      "title": "Aziky",
+      "properties": {
+        "aziky.compiler.path": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Path to the Aziky aziky executable. Empty uses a workspace build or PATH."
+        },
+        "aziky.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Run compiler and linter diagnostics when Aziky files are opened or saved."
+        },
+        "aziky.diagnostics.whileTyping": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Report immediate lexical diagnostics while editing. Semantic diagnostics remain compiler-owned and run on open/save."
+        },
+        "aziky.diagnostics.debounceMilliseconds": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 5000,
+          "scope": "resource",
+          "description": "Delay before updating lexical diagnostics after an edit."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[aziky]": {
+        "editor.defaultFormatter": "aziky.aziky-language",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test ./test/*.test.js",
+    "package": "node ./scripts/package-extension.js"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.2"
+  }
+}

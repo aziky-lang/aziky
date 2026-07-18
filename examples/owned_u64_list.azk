@@ -1,0 +1,20 @@
+fn main() {
+    let mut values: list<u64> = [];
+
+    values.push(10u64);
+    values.push(11u64);
+    values.push(12u64);
+    values.push(13u64);
+    values.push(14u64);
+    values.push(15u64);
+    values.push(16u64);
+    values.push(17u64);
+    values.push(18u64);
+    values.push(19u64);
+
+    values[5u64] = 42u64;
+    values.pop();
+
+    // 42 + 9 elements proves dynamic growth, indexed mutation, pop, and len.
+    exit(values[5u64] + values.len());
+}

@@ -1,0 +1,7 @@
+fn main() {
+let value: u64 = 42u64;
+if value == 42u64 {
+exit(0u64);
+}
+exit(1u64);
+}

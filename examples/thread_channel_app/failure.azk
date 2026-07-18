@@ -1,0 +1,12 @@
+fn fail(value: u64) -> u64 {
+    if value == 1u64 {
+        panic("worker failed");
+    }
+    return 0u64;
+}
+
+fn main() {
+    let thread: Thread = Thread::spawn(fail, 1u64);
+    let status: u64 = thread.join();
+    exit(status);
+}

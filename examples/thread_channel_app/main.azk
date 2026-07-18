@@ -1,0 +1,32 @@
+fn produce(sender: Sender<u64>, count: u64) -> u64 {
+    let mut i: u64 = 0u64;
+    while i < count {
+        sender.send(i + 1u64);
+        i = i + 1u64;
+    }
+    sender.close();
+    return count;
+}
+
+fn consume(receiver: Receiver<u64>, count: u64) -> u64 {
+    let mut i: u64 = 0u64;
+    let mut sum: u64 = 0u64;
+    while i < count {
+        let value: u64 = receiver.recv();
+        sum = sum + value;
+        i = i + 1u64;
+    }
+    receiver.close();
+    return sum;
+}
+
+fn main() {
+    let channel: Channel<u64> = Channel::bounded(3u64);
+    let sender: Sender<u64> = channel.sender();
+    let receiver: Receiver<u64> = channel.receiver();
+    let producer: Thread = Thread::spawn(produce, sender, 100u64);
+    let consumer: Thread = Thread::spawn(consume, receiver, 100u64);
+    let produced: u64 = producer.join();
+    let sum: u64 = consumer.join();
+    exit(sum);
+}

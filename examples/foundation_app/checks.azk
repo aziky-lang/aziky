@@ -1,0 +1,6 @@
+pub fn checked_total(left: u64, right: u64) -> Result<u64, u8> {
+    if left > 100u64 {
+        return Result::Err(1u8);
+    }
+    return Result::Ok(left + right);
+}

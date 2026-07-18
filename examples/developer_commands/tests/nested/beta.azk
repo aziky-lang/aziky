@@ -1,0 +1,7 @@
+fn main() {
+    let result: u64 = 6u64 * 7u64;
+    if result == 42u64 {
+        exit(0u64);
+    }
+    exit(1u64);
+}

@@ -1,0 +1,9 @@
+// Monotonic values are suitable for elapsed durations only. Wall values use the
+// Unix epoch and may move when the host clock is adjusted.
+pub fn monotonic_nanos() -> u64 {
+    return runtime_monotonic_nanos();
+}
+
+pub fn wall_time_nanos() -> u64 {
+    return runtime_wall_time_nanos();
+}

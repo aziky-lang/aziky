@@ -1,0 +1,103 @@
+fn maybe_values(enabled: bool, value: u64) -> Option<list<u64> > {
+    if enabled {
+        let values: list<u64> = [value, value + 1u64];
+        return Option::Some(values);
+    }
+    return Option::None;
+}
+
+fn outcome(enabled: bool, text: string) -> Result<string, list<u64> > {
+    if enabled {
+        return Result::Ok(text);
+    }
+    let errors: list<u64> = [7u64, 9u64];
+    return Result::Err(errors);
+}
+
+fn maybe_scores(enabled: bool, key: u64, include_second: bool) -> Option<map<u64, u16> > {
+    if enabled {
+        let mut scores: map<u64, u16> = {};
+        scores.set(key, 11u16);
+        if include_second {
+            scores.set(key + 1u64, 13u16);
+        }
+        return Option::Some(scores);
+    }
+    return Option::None;
+}
+
+fn score_outcome(enabled: bool, key: u64) -> Result<map<u64, u16>, string> {
+    if enabled {
+        let mut scores: map<u64, u16> = {};
+        scores.set(key, 17u16);
+        scores.set(key + 1u64, 19u16);
+        return Result::Ok(scores);
+    }
+    let message: string = "missing";
+    return Result::Err(message);
+}
+
+fn main() {
+    let seed: u64 = runtime_seed();
+    let first: Option<list<u64> > = maybe_values(true, 10u64);
+    let second: Option<list<u64> > = maybe_values(true, 20u64);
+    let first_total: u64 = match first {
+        Option::Some(values) => values[0u64] + values[1u64],
+        Option::None => 0u64,
+    };
+    let second_total: u64 = match second {
+        Option::Some(values) => values[0u64] + values[1u64],
+        Option::None => 0u64,
+    };
+
+    let ok_text: string = "owned";
+    let fail_text: string = "unused";
+    let ok: Result<string, list<u64> > = outcome(true, ok_text);
+    let failed: Result<string, list<u64> > = outcome(false, fail_text);
+    let ok_len: u64 = match ok {
+        Result::Ok(text) => text.len(),
+        Result::Err(_) => 0u64,
+    };
+    let error_total: u64 = match failed {
+        Result::Ok(_) => 0u64,
+        Result::Err(values) => values[0u64] + values[1u64],
+    };
+
+    let first_scores: Option<map<u64, u16> > = maybe_scores(true, 100u64, false);
+    let second_scores: Option<map<u64, u16> > = maybe_scores(true, 200u64, true);
+    let absent_scores: Option<map<u64, u16> > = maybe_scores(false, 300u64, true);
+    let first_score_count: u64 = match first_scores {
+        Option::Some(scores) => scores.len(),
+        Option::None => 0u64,
+    };
+    let second_score_count: u64 = match second_scores {
+        Option::Some(scores) => scores.len(),
+        Option::None => 0u64,
+    };
+    let absent_score_count: u64 = match absent_scores {
+        Option::Some(scores) => scores.len(),
+        Option::None => 0u64,
+    };
+
+    let score_success: Result<map<u64, u16>, string> = score_outcome(true, 400u64);
+    let score_failure: Result<map<u64, u16>, string> = score_outcome(false, 500u64);
+    let success_score_count: u64 = match score_success {
+        Result::Ok(scores) => scores.len(),
+        Result::Err(_) => 0u64,
+    };
+    let failure_message_len: u64 = match score_failure {
+        Result::Ok(_) => 0u64,
+        Result::Err(message) => message.len(),
+    };
+
+    if first_total != 21u64 { exit(1u64); }
+    if second_total != 41u64 { exit(2u64); }
+    if ok_len != 5u64 { exit(3u64); }
+    if error_total != 16u64 { exit(4u64); }
+    if first_score_count != 1u64 { exit(5u64); }
+    if second_score_count != 2u64 { exit(6u64); }
+    if absent_score_count != 0u64 { exit(7u64); }
+    if success_score_count != 2u64 { exit(8u64); }
+    if failure_message_len != 7u64 { exit(9u64); }
+    exit(seed & 0u64);
+}

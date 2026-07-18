@@ -1,0 +1,7 @@
+struct bad_record {
+    BadField: u64,
+}
+
+fn BadFunction(BadParameter: u64) {
+    exit(BadParameter);
+}

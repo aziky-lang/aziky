@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Aziky discussions
+    url: https://github.com/aziky-lang/aziky/discussions
+    about: Ask usage questions and discuss language or tooling ideas.
+  - name: Security policy
+    url: https://github.com/aziky-lang/aziky/security/policy
+    about: Read the private vulnerability-reporting instructions.

@@ -1,0 +1,30 @@
+// benchmark-contract: histogram;seed=123456789;iterations=20000000;bins=64;index=state&63
+fn main() {
+    let mut state: u64 = 123456789u64;
+    let mut bins: [u64; 64] = [
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64
+    ];
+
+    let mut i: u64 = 0u64;
+    while i < 20000000u64 {
+        state = (state * 1664525u64 + 1013904223u64) & 4294967295u64;
+        let index: u64 = state & 63u64;
+        bins[index] = bins[index] + 1u64;
+        i = i + 1u64;
+    }
+
+    let mut checksum: u64 = state;
+    let mut index: u64 = 0u64;
+    while index < 64u64 {
+        checksum = checksum ^ (bins[index] * (index + 1u64));
+        index = index + 1u64;
+    }
+    exit(checksum & 127u64);
+}

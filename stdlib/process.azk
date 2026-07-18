@@ -1,0 +1,7 @@
+pub fn id() -> u64 {
+    return runtime_process_id();
+}
+
+pub fn exit_with(code: u64) {
+    exit(code);
+}
