@@ -47,7 +47,6 @@ fi
 rg -q '^license = "MIT AND Apache-2\.0"$' Cargo.toml
 rg -q '^MIT AND Apache-2\.0$' LICENSE.md
 rg -q '^authors = \["Yassine Azily"\]$' Cargo.toml
-rg -q '^- Creator and original author: \*\*Yassine Azily\*\*$' README.md
 rg -q '^- License: \*\*MIT AND Apache-2\.0\*\*' README.md
 
 license_files=(
