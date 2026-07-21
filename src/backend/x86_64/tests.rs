@@ -37,23 +37,7 @@ fn builder_interns_duplicate_messages() {
     assert_eq!(count, 1);
 }
 
-#[test]
-fn runtime_bench_loop_emits_loop_and_syscall() {
-    let mut program = X86Program::new();
-    program.emit_runtime_bench_loop(1024);
-    let code = program.finalize();
-    assert!(contains_jne(&code));
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x05])); // syscall
-}
 
-#[test]
-fn runtime_seeded_lcg_loop_emits_rdtsc() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_lcg_loop(16, 1_664_525, 1_013_904_223, true, None);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x05])); // syscall
-}
 
 #[test]
 fn affine_pow_64_steps_matches_scalar_recurrence() {
@@ -125,275 +109,43 @@ fn reversible_u32_affine_pair_recovers_every_demanded_predecessor_bit() {
     }
 }
 
-#[test]
-fn runtime_lcg_demanded_mask_uses_u32_composed_arithmetic() {
-    let mut program = X86Program::new();
-    program.emit_runtime_lcg_loop(
-        50_000_000,
-        123_456_789,
-        1_664_525,
-        1_013_904_223,
-        true,
-        Some(127),
-    );
-    let code = program.finalize();
-    assert!(code.windows(3).any(|window| window == [0x0F, 0xAF, 0xC2]));
-    assert!(code.windows(2).any(|window| window == [0x01, 0xF0]));
-    assert!(
-        !code
-            .windows(4)
-            .any(|window| window == [0x48, 0x0F, 0xAF, 0xC2])
-    );
-}
 
-#[test]
-fn runtime_seeded_alloc_loop_emits_mmap_and_ring_touch() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_lcg_alloc_loop(16, 1_664_525, 1_013_904_223, 65_536, true);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x05])); // syscall
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x88])); // js rel32 (alloc error path)
-    // Check for block increment (either add r11w, 32 or add r11, 32)
-    let has_add_r11w_32 = code.windows(5).any(|w| w == [0x66, 0x41, 0x83, 0xC3, 0x20]);
-    let has_add_r11_32 = code.windows(3).any(|w| w == [0x83, 0xC3, 0x20]);
-    assert!(has_add_r11w_32 || has_add_r11_32);
-}
 
-#[test]
-fn runtime_seeded_alloc_loop_emits_terminal_munmap_syscall() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_lcg_alloc_loop(1, 1_664_525, 1_013_904_223, 65_536, true);
-    let code = program.finalize();
-    let syscall_count = code.windows(2).filter(|w| *w == [0x0F, 0x05]).count();
-    // mmap + munmap + normal-exit + alloc-fail-exit
-    assert!(
-        syscall_count >= 4,
-        "expected munmap syscall in normal path, count={syscall_count}"
-    );
-}
 
-#[test]
-fn runtime_ring_write_u32_mask_uses_32_bit_lcg_step() {
-    let mut program = X86Program::new();
-    program.emit_runtime_ring_write_loop(
-        16,
-        123_456_789,
-        0,
-        1_664_525,
-        1_013_904_223,
-        0xffff_ffff,
-        63,
-        32,
-        127,
-    );
-    let code = program.finalize();
-    let mut imul_eax = vec![0x69, 0xC0];
-    imul_eax.extend_from_slice(&1_664_525i32.to_le_bytes());
-    let mut imul_rax = vec![0x48, 0x69, 0xC0];
-    imul_rax.extend_from_slice(&1_664_525i32.to_le_bytes());
-    let mut add_eax = vec![0x05];
-    add_eax.extend_from_slice(&1_013_904_223u32.to_le_bytes());
 
-    assert!(code.windows(imul_eax.len()).any(|w| w == imul_eax));
-    assert!(code.windows(add_eax.len()).any(|w| w == add_eax));
-    assert!(!code.windows(imul_rax.len()).any(|w| w == imul_rax));
-    assert!(code.windows(4).any(|w| w == [0x4E, 0x89, 0x24, 0xEB])); // ring store
-    assert!(contains_jne(&code));
-}
 
-#[test]
-fn runtime_ring_write_initializes_storage_and_honors_index_init() {
-    let mut program = X86Program::new();
-    program.emit_runtime_ring_write_loop(1, 7, 5, 3, 1, u64::MAX, 63, 1, 127);
-    let code = program.finalize();
 
-    assert!(code.windows(3).any(|w| w == [0xF3, 0x48, 0xAB])); // rep stosq
-    let mut mov_r13 = vec![0x49, 0xBD];
-    mov_r13.extend_from_slice(&5u64.to_le_bytes());
-    assert!(code.windows(mov_r13.len()).any(|w| w == mov_r13));
-}
 
-#[test]
-fn runtime_ring_write_zero_iterations_uses_initialized_result() {
-    let mut program = X86Program::new();
-    program.emit_runtime_ring_write_loop(0, 5, 0, 3, 1, u64::MAX, 63, 1, 127);
-    let code = program.finalize();
-    assert!(code.windows(5).any(|w| w == [0xBF, 0x0F, 0, 0, 0])); // mov edi, 15
-}
 
-#[test]
-fn runtime_ring_write_wide_state_math_uses_unsigned_constants() {
-    let mut program = X86Program::new();
-    program.emit_runtime_ring_write_loop(
-        1,
-        7,
-        0,
-        0x8000_0001,
-        0x8000_0002,
-        u64::MAX,
-        63,
-        1,
-        0x0000_FFFF_FFFF_FFFE,
-    );
-    let code = program.finalize();
 
-    assert!(code.windows(4).any(|w| w == [0x49, 0x0F, 0xAF, 0xC0])); // imul rax, r8
-    assert!(code.windows(3).any(|w| w == [0x4C, 0x01, 0xC8])); // add rax, r9
-    assert!(code.windows(3).any(|w| w == [0x48, 0x21, 0xCF])); // and rdi, rcx
-}
 
-#[test]
-fn runtime_seeded_predictable_branch_loop_emits_conditional_jumps() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_predictable_branch_lcg_loop(
-        256,
-        128,
-        1_664_525,
-        1_013_904_223,
-        22_695_477,
-        1,
-        true,
-        None,
-    );
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(contains_jne(&code));
-}
+
+
+
+
+
 
 fn contains_jne(code: &[u8]) -> bool {
     code.windows(2).any(|w| w == [0x0F, 0x85] || w[0] == 0x75)
 }
 
-#[test]
-fn runtime_seeded_unpredictable_branch_loop_emits_cmp_and_jb() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_unpredictable_branch_lcg_loop(
-        64,
-        1 << 63,
-        1_664_525,
-        1_013_904_223,
-        22_695_477,
-        1,
-        true,
-        None,
-    );
-    let code = program.finalize();
-    assert!(code.windows(4).any(|w| w == [0x49, 0x0F, 0x42, 0xD8])); // cmovb rbx, r8
-    assert!(code.windows(4).any(|w| w == [0x49, 0x0F, 0x42, 0xF2])); // cmovb rsi, r10
-    assert!(code.windows(3).any(|w| w == [0x48, 0x39, 0xD0])); // cmp rax, rdx
-}
 
-#[test]
-fn runtime_masked_branch_loop_uses_32_bit_arithmetic() {
-    let mut program = X86Program::new();
-    program.emit_runtime_branch_lcg_loop(
-        64,
-        123_456_789,
-        0xFFFF_FFFF,
-        1 << 31,
-        1_664_525,
-        1_013_904_223,
-        22_695_477,
-        1,
-        true,
-        Some(127),
-    );
-    let code = program.finalize();
-    assert!(code.windows(3).any(|w| w == [0x0F, 0xAF, 0xC3])); // imul eax, ebx
-    assert!(code.windows(2).any(|w| w == [0x01, 0xF0])); // add eax, esi
-}
 
-#[test]
-fn runtime_seeded_affine_index_loop_emits_index_math() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_affine_index_loop(32, 0, 4, 4, 16, u64::MAX, true, None);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(code.windows(4).any(|w| w == [0x48, 0x83, 0xC2, 0x20])); // add rdx, 32
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x85])); // jnz rel32
-}
 
-#[test]
-fn runtime_seeded_affine_closed_form_emits_single_affine_step() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_affine_closed_form(4, 16, true);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(code.windows(4).any(|w| w == [0x48, 0x69, 0xC0, 0x04])); // imul rax, rax, 4 (prefix)
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x05])); // syscall
-}
 
-#[test]
-fn runtime_seeded_affine_closed_form_zero_mul_skips_seed_load() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_affine_closed_form(0, 16, true);
-    let code = program.finalize();
-    assert!(!code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc skipped
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x05])); // syscall
-}
 
-#[test]
-fn affine_index_chunk_matches_scalar_recurrence() {
-    let step_a = 32u64;
-    let step_b = 4u64;
-    let step_c = (-3i64) as u64;
-    let (a, b, c) = X86Program::affine_index_chunk(step_a, step_b, step_c, 32);
 
-    for (initial_state, initial_index) in [
-        (0u64, 0u64),
-        (123_456_789, 0),
-        (u64::MAX, 17),
-        (0xDEAD_BEEF_CAFE_BABE, u64::MAX - 4),
-    ] {
-        let mut scalar = initial_state;
-        let mut index = initial_index;
-        for _ in 0..32 {
-            scalar = scalar
-                .wrapping_mul(step_a)
-                .wrapping_add(index.wrapping_mul(step_b))
-                .wrapping_add(step_c);
-            index = index.wrapping_add(1);
-        }
-        let chunked = initial_state
-            .wrapping_mul(a)
-            .wrapping_add(initial_index.wrapping_mul(b))
-            .wrapping_add(c);
-        assert_eq!(chunked, scalar);
-    }
-}
 
-#[test]
-fn runtime_seeded_dual_state_branch_loop_emits_branch_path() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_dual_state_branch_loop(32, 0, false, false, true);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x82])); // jb rel32
-    assert!(code.windows(3).any(|w| w == [0x48, 0x01, 0xD0])); // add rax, rdx
-    assert!(code.windows(3).any(|w| w == [0x48, 0xFF, 0xC0])); // inc rax
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x85])); // jnz rel32
-}
 
-#[test]
-fn runtime_seeded_dual_state_branch_loop_emits_branchless_path() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_dual_state_branch_loop(32, 0, false, true, true);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x31])); // rdtsc
-    assert!(code.windows(3).any(|w| w == [0x0F, 0x42, 0xC1])); // cmovb rax, r9
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x85])); // jnz rel32
-}
 
-#[test]
-fn runtime_seeded_dual_state_branch_loop_emits_adaptive_switch() {
-    let mut program = X86Program::new();
-    program.emit_runtime_seeded_dual_state_branch_loop(8192, 0, true, false, true);
-    let code = program.finalize();
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x92])); // setb r/m8
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x87])); // ja rel32
-    assert!(code.windows(2).any(|w| w == [0x0F, 0x82])); // jb rel32 in branchful body
-    assert!(code.windows(3).any(|w| w == [0x0F, 0x42, 0xC1])); // cmovb rax, r9 in branchless body
-}
+
+
+
+
+
+
+
+
 
 #[test]
 fn runtime_generic_program_emits_control_flow() {
@@ -2154,61 +1906,11 @@ fn runtime_classic_bloom_result_branch_fuses_only_when_lane_state_is_dead() {
     );
 }
 
-#[test]
-fn runtime_bloom_filter_kernel_preserves_all_four_lanes_and_both_loops() {
-    let mut program = X86Program::new();
-    program.emit_runtime_bloom_filter_loop(123_456_789, 10_000, 1_000_000, 0, 127);
-    let code = program.finalize();
 
-    let bts = [0x48, 0x0F, 0xAB, 0xC8];
-    let shrx = [0xC4, 0xE2, 0xF3, 0xF7, 0x04, 0xD3];
-    assert_eq!(code.windows(4).filter(|window| *window == bts).count(), 4);
-    assert_eq!(
-        code.windows(shrx.len())
-            .filter(|window| *window == shrx)
-            .count(),
-        8
-    );
-    assert!(code.windows(3).any(|window| window == [0xF3, 0x48, 0xAB]));
-    assert!(contains_jne(&code));
-}
 
-#[test]
-fn runtime_bloom_filter_kernel_uses_bit_test_fallback_without_bmi2() {
-    let mut program = X86Program::with_options(X86BackendOptions {
-        target_features: TargetFeatureSet {
-            bmi2: false,
-            ..TargetFeatureSet::default()
-        },
-        ..X86BackendOptions::default()
-    });
-    program.emit_runtime_bloom_filter_loop(123_456_789, 1, 1, 0, 127);
-    let code = program.finalize();
 
-    let bt = [0x48, 0x0F, 0xA3, 0xC8];
-    let shrx = [0xC4, 0xE2, 0xF3, 0xF7, 0x04, 0xD3];
-    assert_eq!(code.windows(4).filter(|window| *window == bt).count(), 4);
-    assert_eq!(
-        code.windows(shrx.len())
-            .filter(|window| *window == shrx)
-            .count(),
-        0
-    );
-}
 
-#[test]
-fn runtime_bloom_filter_zero_trip_returns_initial_hits() {
-    let mut program = X86Program::new();
-    program.emit_runtime_bloom_filter_loop(9, 0, 0, 77, 127);
-    let code = program.finalize();
-    assert!(code.windows(3).any(|window| window == [0x4C, 0x89, 0xFF]));
-    assert!(
-        !code
-            .windows(4)
-            .any(|window| window == [0x48, 0x0F, 0xAB, 0xC8])
-    );
-    assert!(!contains_jne(&code));
-}
+
 
 #[test]
 fn runtime_generic_hash_group_probe_kernel_emits_simd_match_scan() {
@@ -2238,29 +1940,4 @@ fn runtime_generic_hash_group_probe_kernel_emits_simd_match_scan() {
         code.windows(3).any(|w| w == [0x66, 0x0F, 0xD7]),
         "expected pmovmskb in grouped control-byte probe path"
     );
-}
-
-#[test]
-fn runtime_prefix_scan_kernel_uses_sse2_low_words() {
-    let mut program = X86Program::new();
-    program.emit_runtime_prefix_scan_loop(
-        8,
-        123_456_789,
-        1_664_525,
-        1_013_904_223,
-        0xffff_ffff,
-        0xffff,
-        16,
-        127,
-    );
-    let code = program.finalize();
-    assert!(
-        code.windows(3).any(|window| window == [0x66, 0x0f, 0xd5]),
-        "expected pmullw for parallel affine lookahead"
-    );
-    assert!(
-        code.windows(3).any(|window| window == [0x66, 0x0f, 0x61]),
-        "expected zero-extension of packed u16 lanes"
-    );
-    assert!(contains_jne(&code));
 }

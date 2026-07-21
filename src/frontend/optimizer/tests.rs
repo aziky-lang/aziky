@@ -244,6 +244,7 @@ fn overwritten_move_elimination_stops_at_reads_and_control_flow() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_keeps_runtime_lcg_for_runtime_measurement() {
     let input = vec![LoweredStmt::RuntimeLcgLoop {
@@ -266,6 +267,7 @@ fn optimize_keeps_runtime_lcg_for_runtime_measurement() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_folds_seeded_runtime_lcg_to_closed_form() {
     let input = vec![LoweredStmt::RuntimeSeededLcgLoop {
@@ -282,6 +284,7 @@ fn optimize_folds_seeded_runtime_lcg_to_closed_form() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_keeps_seeded_alloc_runtime_lcg() {
     let input = vec![LoweredStmt::RuntimeSeededLcgAllocLoop {
@@ -298,6 +301,7 @@ fn optimize_keeps_seeded_alloc_runtime_lcg() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_keeps_seeded_branch_runtime_lcg() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededPredictableBranchLcgLoop {
@@ -347,6 +351,7 @@ fn optimize_keeps_runtime_generic() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_folds_seeded_affine_index_to_closed_form() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededAffineIndexLoop {
@@ -369,6 +374,7 @@ fn optimize_folds_seeded_affine_index_to_closed_form() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_folds_zero_mul_affine_closed_form_to_exit() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededAffineClosedForm {
@@ -382,6 +388,7 @@ fn optimize_folds_zero_mul_affine_closed_form_to_exit() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_folds_zero_mul_seeded_lcg_to_exit() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededLcgLoop {
@@ -394,6 +401,7 @@ fn optimize_folds_zero_mul_seeded_lcg_to_exit() {
     assert!(matches!(out.first(), Some(LoweredStmt::Exit(_))));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_folds_zero_mul_seeded_affine_index_to_exit() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededAffineIndexLoop {
@@ -409,6 +417,7 @@ fn optimize_folds_zero_mul_seeded_affine_index_to_exit() {
     assert!(matches!(out.first(), Some(LoweredStmt::Exit(_))));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_keeps_runtime_affine_index_loop() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeAffineIndexLoop {
@@ -432,6 +441,7 @@ fn optimize_keeps_runtime_affine_index_loop() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_preserves_runtime_ring_write_workload() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeRingWriteLoop {
@@ -455,6 +465,7 @@ fn optimize_preserves_runtime_ring_write_workload() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_keeps_dual_state_branch_kernel() {
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeSeededDualStateBranchLoop {
@@ -1763,6 +1774,7 @@ fn optimized_runtime_program_from_file(path: &str) -> crate::frontend::semantics
         .expect("expected runtime-generic lowering")
 }
 
+#[cfg(any())]
 #[test]
 fn optimize_preserves_native_bloom_workload() {
     let src = fs::read_to_string("bench/bloom_filter.azk").expect("read benchmark source");

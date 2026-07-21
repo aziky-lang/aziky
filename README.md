@@ -61,54 +61,10 @@ separately in the [standard-library roadmap](docs/STANDARD_LIBRARY_ROADMAP.md).
 Unsupported target/runtime combinations are rejected before code emission. See
 [Aziky targets](docs/AZIKY_TARGETS.md) for the full capability matrix.
 
-## Performance snapshot
+## Performance measurement
 
-Lower is better. Ratios are `comparison time / Aziky time`, so values above
-`1.0x` favor Aziky.
-
-| Scenario | Aziky | Optimized Rust | Optimized C | Rust / Aziky | C / Aziky |
-|---|---:|---:|---:|---:|---:|
-| Stream LCG | 3.340 ms | 4.018 ms | 3.582 ms | 1.203x | 1.072x |
-| Packet classifier | 105.292 ms | 123.039 ms | 123.165 ms | 1.169x | 1.170x |
-| Ring write | 69.310 ms | 85.541 ms | 82.527 ms | 1.234x | 1.191x |
-| Affine mix | 4.035 ms | 44.582 ms | 5.245 ms | 11.049x | 1.300x |
-| Sort window | 84.811 ms | 102.651 ms | 102.340 ms | 1.210x | 1.207x |
-| Bloom filter | 5.980 ms | 6.874 ms | 6.575 ms | 1.150x | 1.100x |
-| Hash join | 5.108 ms | 5.371 ms | 5.154 ms | 1.051x | 1.009x |
-| Histogram | 29.685 ms | 30.203 ms | 29.878 ms | 1.017x | 1.007x |
-| Binary search | 13.236 ms | 57.886 ms | 35.298 ms | 4.373x | 2.667x |
-| Prefix scan | 5.863 ms | 24.944 ms | 9.503 ms | 4.255x | 1.621x |
-| **Geometric mean** | — | — | — | **1.873x** | **1.275x** |
-
-Snapshot measured 2026-07-18 on an Intel Core i5-7200U running x86-64 Linux:
-100 measured runs, 10 warmups, median score, pinned to CPU 1.
-
-**Rust and C are aggressively optimized production builds—not debug builds or
-default compiler invocations.** The harness uses the strongest practical
-non-PGO settings currently configured for each comparison:
-
-- Rust 1.88: `-C opt-level=3 -C target-cpu=native -C codegen-units=1 -C
-  lto=fat -C panic=abort -C overflow-checks=off`.
-- Clang 22.1.8, C17: `-O3 -march=native -flto -DNDEBUG
-  -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-unwind-tables`.
-
-This enables maximum optimization, native instruction selection, and full link
-time optimization for both comparison toolchains within the benchmark harness.
-
-Every timed triplet must first match its process result and full 64-bit
-checksum. Identical machine-checked workload contracts cover the algorithm,
-constants, data sizes, loop bounds, and reduction used by all three sources.
-After that parity gate, every compiler is free to apply any legal optimization.
-The harness rotates execution order to reduce thermal/frequency bias. Reproduce
-the snapshot with:
-
-```text
-scripts/run_bench_suite.sh --runs 100 --warmup 10 --score-stat median \
-  --cpu-set 1 --csv target/bench/readme_benchmark_100.csv
-```
-
-These are focused microbenchmarks on one machine, not a claim that every Aziky
-program outperforms Rust or C. See [benchmark methodology](bench/README.md).
+The repository retains its cross-language workloads and checksum parity gates
+as correctness regressions. New performance results will be published soon... See [benchmark methodology](bench/README.md).
 
 ## Build from source
 

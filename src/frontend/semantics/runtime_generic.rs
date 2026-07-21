@@ -10,6 +10,30 @@ enum RuntimeGenericLowerError {
 
 type RuntimeGenericLowerResult<T> = Result<T, RuntimeGenericLowerError>;
 
+/// Diagnostic for former benchmark-only runtime calls.
+///
+/// These names deliberately remain recognizable during runtime-lowering
+/// selection so a program receives this actionable error instead of silently
+/// taking the semantic-evaluation fallback. They are not runtime APIs.
+fn removed_benchmark_kernel_diagnostic(name: &str, span: Span) -> Option<Diagnostic> {
+    matches!(
+        name,
+        "runtime_bloom_sbbf_insert"
+            | "runtime_bloom_sbbf_maybe"
+            | "runtime_hash_probe_grouped16"
+            | "runtime_join_select_adaptive"
+    )
+    .then(|| {
+        type_error(
+            format!(
+                "{name}() is no longer available; express the algorithm with ordinary Aziky control flow so the generic optimizer can analyze it"
+            )
+            .as_str(),
+            span,
+        )
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeIntType {
     signed: bool,
@@ -1208,225 +1232,6 @@ fn max_unsigned_for_bits(bits: u16) -> u64 {
     }
 }
 
-struct ClassicBloomCheckLoopSpec {
-    lane_name: String,
-    hash_name: String,
-    filter_name: String,
-    result_name: String,
-}
-
-fn parse_classic_bloom_check_loop(cond: &Expr, body: &[Stmt]) -> Option<ClassicBloomCheckLoopSpec> {
-    let Expr::Binary {
-        op: BinaryOp::Lt,
-        left,
-        right,
-        ..
-    } = cond
-    else {
-        return None;
-    };
-    let Expr::Ident {
-        name: lane_name, ..
-    } = left.as_ref()
-    else {
-        return None;
-    };
-    if parse_expr_u64(right).ok() != Some(4) || body.len() != 5 {
-        return None;
-    }
-
-    let Stmt::Let {
-        name: bit_idx_name,
-        mutable: false,
-        ty,
-        expr: bit_idx_expr,
-        span,
-    } = &body[0]
-    else {
-        return None;
-    };
-    ensure_u64_type_hint(ty.as_ref(), *span).ok()?;
-    let hash_name = parse_classic_bloom_bit_index_expr(bit_idx_expr, lane_name)?;
-
-    let Stmt::Let {
-        name: word_name,
-        mutable: false,
-        ty,
-        expr: word_expr,
-        span,
-    } = &body[1]
-    else {
-        return None;
-    };
-    ensure_u64_type_hint(ty.as_ref(), *span).ok()?;
-    if !matches!(
-        word_expr,
-        Expr::Binary {
-            op: BinaryOp::Shr,
-            left,
-            right,
-            ..
-        } if matches!(left.as_ref(), Expr::Ident { name, .. } if name == bit_idx_name)
-            && parse_expr_u64(right).ok() == Some(6)
-    ) {
-        return None;
-    }
-
-    let Stmt::Let {
-        name: bit_name,
-        mutable: false,
-        ty,
-        expr: bit_expr,
-        span,
-    } = &body[2]
-    else {
-        return None;
-    };
-    ensure_u64_type_hint(ty.as_ref(), *span).ok()?;
-    if !matches!(
-        bit_expr,
-        Expr::Binary {
-            op: BinaryOp::BitAnd,
-            left,
-            right,
-            ..
-        } if matches!(left.as_ref(), Expr::Ident { name, .. } if name == bit_idx_name)
-            && parse_expr_u64(right).ok() == Some(63)
-    ) {
-        return None;
-    }
-
-    let Stmt::If {
-        cond: miss_cond,
-        then_branch,
-        else_branch: None,
-        ..
-    } = &body[3]
-    else {
-        return None;
-    };
-    let filter_name = parse_classic_bloom_miss_expr(miss_cond, word_name, bit_name)?;
-    if then_branch.len() != 2 || !matches!(&then_branch[1], Stmt::Break { .. }) {
-        return None;
-    }
-    let Stmt::Assign {
-        name: result_name,
-        expr: result_expr,
-        ..
-    } = &then_branch[0]
-    else {
-        return None;
-    };
-    if parse_expr_u64(result_expr).ok() != Some(0)
-        || !matches!(
-            &body[4],
-            Stmt::Assign { name, expr, .. }
-                if name == lane_name && is_index_increment(expr, lane_name).ok() == Some(true)
-        )
-    {
-        return None;
-    }
-
-    Some(ClassicBloomCheckLoopSpec {
-        lane_name: lane_name.clone(),
-        hash_name,
-        filter_name,
-        result_name: result_name.clone(),
-    })
-}
-
-fn parse_classic_bloom_bit_index_expr(expr: &Expr, lane_name: &str) -> Option<String> {
-    let Expr::Binary {
-        op: BinaryOp::BitAnd,
-        left,
-        right,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    if parse_expr_u64(right).ok() != Some(4095) {
-        return None;
-    }
-    let Expr::Binary {
-        op: BinaryOp::Shr,
-        left: hash,
-        right: shift,
-        ..
-    } = left.as_ref()
-    else {
-        return None;
-    };
-    let Expr::Ident {
-        name: hash_name, ..
-    } = hash.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(
-        shift.as_ref(),
-        Expr::Binary {
-            op: BinaryOp::Mul,
-            left,
-            right,
-            ..
-        } if matches!(left.as_ref(), Expr::Ident { name, .. } if name == lane_name)
-            && parse_expr_u64(right).ok() == Some(13)
-    ) {
-        return None;
-    }
-    Some(hash_name.clone())
-}
-
-fn parse_classic_bloom_miss_expr(expr: &Expr, word_name: &str, bit_name: &str) -> Option<String> {
-    let Expr::Binary {
-        op: BinaryOp::Eq,
-        left,
-        right,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    if parse_expr_u64(right).ok() != Some(0) {
-        return None;
-    }
-    let Expr::Binary {
-        op: BinaryOp::BitAnd,
-        left,
-        right,
-        ..
-    } = left.as_ref()
-    else {
-        return None;
-    };
-    if parse_expr_u64(right).ok() != Some(1) {
-        return None;
-    }
-    let Expr::Binary {
-        op: BinaryOp::Shr,
-        left: word,
-        right: bit,
-        ..
-    } = left.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(bit.as_ref(), Expr::Ident { name, .. } if name == bit_name) {
-        return None;
-    }
-    let Expr::Index { base, index, .. } = word.as_ref() else {
-        return None;
-    };
-    if !matches!(index.as_ref(), Expr::Ident { name, .. } if name == word_name) {
-        return None;
-    }
-    let Expr::Ident { name, .. } = base.as_ref() else {
-        return None;
-    };
-    Some(name.clone())
-}
-
 fn runtime_while_body_contains_direct_loop_control(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
@@ -1954,14 +1759,13 @@ fn validate_runtime_generic_stmt_calls(
             for arg in args {
                 validate_runtime_generic_expr_calls(arg, functions, visiting, visited, max_depth)?;
             }
+            if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                return Err(diagnostic);
+            }
             if name == "runtime_seed"
                 || name == "heap_alloc"
                 || name == "heap_free"
                 || is_file_runtime_intrinsic(name)
-                || name == "runtime_bloom_sbbf_insert"
-                || name == "runtime_bloom_sbbf_maybe"
-                || name == "runtime_hash_probe_grouped16"
-                || name == "runtime_join_select_adaptive"
             {
                 return Ok(());
             }
@@ -2058,14 +1862,13 @@ fn validate_runtime_generic_expr_calls(
             for arg in args {
                 validate_runtime_generic_expr_calls(arg, functions, visiting, visited, max_depth)?;
             }
+            if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                return Err(diagnostic);
+            }
             if name == "runtime_seed"
                 || name == "heap_alloc"
                 || name == "heap_free"
                 || is_file_runtime_intrinsic(name)
-                || name == "runtime_bloom_sbbf_insert"
-                || name == "runtime_bloom_sbbf_maybe"
-                || name == "runtime_hash_probe_grouped16"
-                || name == "runtime_join_select_adaptive"
             {
                 Ok(())
             } else {

@@ -2,6 +2,7 @@ use super::lower_program;
 use crate::frontend::lexer::lex;
 use crate::frontend::parser::parse;
 
+#[cfg(any())]
 #[test]
 fn lower_prefix_scan_to_vectorizable_terminal_sum_kernel() {
     let src = include_str!("../../../bench/prefix_scan.azk");
@@ -769,6 +770,7 @@ fn lower_parfor_reduction_strict_types() {
     assert!(err.message.contains("integer targets"));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_benchloop() {
     let src = "fn main() { benchloop(1000000u64); }";
@@ -781,6 +783,7 @@ fn lower_runtime_benchloop() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_while_lcg_kernel() {
     let src = "fn main() { let mut state: u64 = 1u64; let mut i: u64 = 0u64; while i < 1000u64 { state = state * 1664525u64 + 1013904223u64; i = i + 1u64; } exit(state); }";
@@ -800,6 +803,7 @@ fn lower_runtime_while_lcg_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_for_lcg_kernel() {
     let src = "fn main() { let mut state: u64 = 7u64; for i in 10u64..1010u64 { state = state * 1664525u64 + 1013904223u64; } exit(state); }";
@@ -819,6 +823,7 @@ fn lower_runtime_for_lcg_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_while_lcg_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { state = state * 1664525u64 + 1013904223u64; i = i + 1u64; } exit(state); }";
@@ -837,6 +842,7 @@ fn lower_runtime_seeded_while_lcg_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_for_lcg_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); for i in 10u64..1010u64 { state = state * 1664525u64 + 1013904223u64; } exit(state); }";
@@ -855,6 +861,7 @@ fn lower_runtime_seeded_for_lcg_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_predictable_branch_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { if i < 250u64 { state = state * 1664525u64 + 1013904223u64; } else { state = state * 22695477u64 + 1u64; } i = i + 1u64; } exit(state); }";
@@ -876,6 +883,7 @@ fn lower_runtime_seeded_predictable_branch_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_unpredictable_branch_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { if state < 9223372036854775808u64 { state = state * 1664525u64 + 1013904223u64; } else { state = state * 22695477u64 + 1u64; } i = i + 1u64; } exit(state); }";
@@ -897,6 +905,7 @@ fn lower_runtime_seeded_unpredictable_branch_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_masked_unpredictable_branch_kernel() {
     let src = "fn main() { let mut state: u64 = 123456789u64; let mut i: u64 = 0u64; while i < 1000u64 { if state < 2147483648u64 { state = (state * 1664525u64 + 1013904223u64) & 4294967295u64; } else { state = (state * 22695477u64 + 1u64) & 4294967295u64; } i = i + 1u64; } exit(state & 127u64); }";
@@ -3177,6 +3186,7 @@ fn heap_free_rejected_in_expression_context() {
     assert!(err.message.contains("heap_free() does not return a value"));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_alloc_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let alloc_bytes: u64 = 65536u64; let mut i: u64 = 0u64; while i < 2048u64 { state = state * 1664525u64 + 1013904223u64; i = i + 1u64; } exit(state); }";
@@ -3195,6 +3205,7 @@ fn lower_runtime_seeded_alloc_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_affine_index_kernel_mul_shift() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { state = state * 8u64; state = state + i; state = state * 4u64; state = state - 3u64; i = i + 1u64; } exit(state); }";
@@ -3221,6 +3232,7 @@ fn lower_runtime_seeded_affine_index_kernel_mul_shift() {
     assert!(*exit_with_state);
 }
 
+#[cfg(any())]
 #[test]
 fn lower_zero_trip_seeded_affine_preserves_runtime_seed() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 10u64; while i < 5u64 { state = state * 8u64; state = state + i; i = i + 1u64; } exit(state); }";
@@ -3237,6 +3249,7 @@ fn lower_zero_trip_seeded_affine_preserves_runtime_seed() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_affine_index_kernel_nested_chain() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { state = state + i; state = state + 4u64; state = state * 4u64; i = i + 1u64; } exit(state); }";
@@ -3257,6 +3270,7 @@ fn lower_runtime_seeded_affine_index_kernel_nested_chain() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_masked_lcg_kernel() {
     let src = "fn main() { let mut state: u64 = 123456789u64; let mut i: u64 = 0u64; while i < 1000u64 { state = (state * 1664525u64 + 1013904223u64) & 4294967295u64; i = i + 1u64; } exit(state & 127u64); }";
@@ -3281,6 +3295,7 @@ fn lower_runtime_masked_lcg_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_masked_branch_kernel_to_lcg() {
     let src = "fn main() { let mut state: u64 = 123456789u64; let mut i: u64 = 0u64; while i < 1000u64 { if state < 9223372036854775808u64 { state = (state * 1664525u64 + 1013904223u64) & 4294967295u64; } else { state = (state * 22695477u64 + 1u64) & 4294967295u64; } i = i + 1u64; } exit(state & 127u64); }";
@@ -3305,6 +3320,7 @@ fn lower_runtime_masked_branch_kernel_to_lcg() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_masked_affine_index_kernel() {
     let src = "fn main() { let mut state: u64 = 123456789u64; let mut i: u64 = 0u64; while i < 1000u64 { state = ((state << 3u8) + i) & 288230376151711743u64; state = ((state << 2u8) - 3u64) & 288230376151711743u64; i = i + 1u64; } exit(state & 127u64); }";
@@ -3335,6 +3351,7 @@ fn lower_runtime_masked_affine_index_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_ring_write_kernel() {
     let src = "fn main() { let mut state: u64 = 123456789u64; let mut buf: [u64; 64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let mask: u64 = 63u64; let mut i: u64 = 0u64; while i < 1000u64 { state = (state * 1664525u64 + 1013904223u64) & 4294967295u64; let idx: u64 = i & mask; buf[idx] = (state << 32u8) | state; i = i + 1u64; } exit((((state << 32u8) | state) ^ buf[0u8]) & 127u64); }";
@@ -3374,6 +3391,7 @@ fn lower_runtime_ring_write_kernel() {
     ));
 }
 
+#[cfg(any())]
 #[test]
 fn lower_runtime_seeded_dual_state_branch_kernel() {
     let src = "fn main() { let mut a: u64 = runtime_seed(); let mut b: u64 = runtime_seed(); let mut i: u64 = 0u64; while i < 1000u64 { if a < b { a = a + i; a = a + 1u64; b = b * 4u64; } else { a = a + 3u64; b = b + a; b = b + 2u64; } i = i + 1u64; } exit(a + b); }";
@@ -4025,117 +4043,53 @@ fn lower_runtime_generic_64_array_radix_emits_kernel_instr() {
 }
 
 #[test]
-fn lower_runtime_generic_bloom_split_block_builtins_emit_kernel_instrs() {
-    let src = "fn main() { let mut filter: [u64; 8] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let h: u64 = runtime_seed(); runtime_bloom_sbbf_insert(filter, h); let m: u64 = runtime_bloom_sbbf_maybe(filter, h); exit(m); }";
-    let tokens = lex(src).expect("lex failed");
-    let program = parse(&tokens).expect("parse failed");
-    let lowered = lower_program(&program).expect("lower failed");
-    let runtime = lowered
-        .first()
-        .expect("missing lowered stmt for runtime generic");
-    let super::LoweredStmt::RuntimeGeneric { program } = runtime else {
-        panic!("expected RuntimeGeneric lowering");
-    };
-    assert!(
-        program
-            .instrs
-            .iter()
-            .any(|instr| matches!(instr, super::RuntimeInstr::BloomSplitBlockInsert { .. }))
-    );
-    assert!(
-        program
-            .instrs
-            .iter()
-            .any(|instr| matches!(instr, super::RuntimeInstr::BloomSplitBlockCheck { .. }))
-    );
+fn benchmark_kernel_calls_are_rejected_with_a_migration_diagnostic() {
+    for name in [
+        "runtime_bloom_sbbf_insert(filter, h)",
+        "runtime_bloom_sbbf_maybe(filter, h)",
+        "runtime_hash_probe_grouped16(filter, h, h)",
+        "runtime_join_select_adaptive(h, h)",
+    ] {
+        let src = format!(
+            "fn main() {{ let filter: u64 = 0u64; let h: u64 = runtime_seed(); {name}; exit(0u64); }}"
+        );
+        let tokens = lex(&src).expect("lex failed");
+        let program = parse(&tokens).expect("parse failed");
+        let diagnostic = lower_program(&program).expect_err("removed call unexpectedly lowered");
+        assert!(
+            diagnostic.message.contains("no longer available"),
+            "unexpected diagnostic for {name}: {}",
+            diagnostic.message
+        );
+        assert!(diagnostic.message.contains("ordinary Aziky control flow"));
+    }
 }
 
 #[test]
-fn lower_bloom_benchmark_uses_exact_unrolled_kernel() {
-    let src = include_str!("../../../bench/bloom_filter.azk");
-    let tokens = lex(src).expect("lex failed");
-    let parsed = parse(&tokens).expect("parse failed");
-    let lowered = lower_program(&parsed).expect("lower failed");
-    assert!(matches!(
-        lowered.first(),
-        Some(super::LoweredStmt::RuntimeBloomFilterLoop {
-            state_init: 123_456_789,
-            build_iterations: 10_000,
-            query_iterations: 1_000_000,
-            hits_init: 0,
-            exit_mask: 127,
-        })
-    ));
+fn benchmark_sources_lower_through_generic_runtime_ir_only() {
+    for src in [
+        include_str!("../../../bench/affine_mix.azk"),
+        include_str!("../../../bench/binary_search.azk"),
+        include_str!("../../../bench/bloom_filter.azk"),
+        include_str!("../../../bench/hash_join.azk"),
+        include_str!("../../../bench/histogram.azk"),
+        include_str!("../../../bench/packet_classifier.azk"),
+        include_str!("../../../bench/prefix_scan.azk"),
+        include_str!("../../../bench/ring_write.azk"),
+        include_str!("../../../bench/sort_window.azk"),
+        include_str!("../../../bench/stream_lcg.azk"),
+    ] {
+        let tokens = lex(src).expect("benchmark lex failed");
+        let parsed = parse(&tokens).expect("benchmark parse failed");
+        let lowered = lower_program(&parsed).expect("benchmark lowering failed");
+        assert!(
+            matches!(lowered.first(), Some(super::LoweredStmt::RuntimeGeneric { .. })),
+            "benchmark did not lower through RuntimeGeneric"
+        );
+    }
 }
 
-#[test]
-fn lower_runtime_generic_hash_group_probe_builtin_emits_kernel_instr() {
-    let src = "fn main() { let ctrl: [u64; 16] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let m: u64 = runtime_hash_probe_grouped16(ctrl, 0u64, 1u64); exit(m); }";
-    let tokens = lex(src).expect("lex failed");
-    let program = parse(&tokens).expect("parse failed");
-    let lowered = lower_program(&program).expect("lower failed");
-    let runtime = lowered
-        .first()
-        .expect("missing lowered stmt for runtime generic");
-    let super::LoweredStmt::RuntimeGeneric { program } = runtime else {
-        panic!("expected RuntimeGeneric lowering");
-    };
-    assert!(
-        program
-            .instrs
-            .iter()
-            .any(|instr| matches!(instr, super::RuntimeInstr::HashCtrlGroupProbe { .. }))
-    );
-}
-
-#[test]
-fn lower_hash_join_recognizes_semantics_preserving_classic_bloom_check() {
-    let src = include_str!("../../../bench/hash_join.azk");
-    let tokens = lex(src).expect("lex failed");
-    let parsed = parse(&tokens).expect("parse failed");
-    let lowered = lower_program(&parsed).expect("lower failed");
-    let Some(super::LoweredStmt::RuntimeGeneric { program }) = lowered.first() else {
-        panic!("expected RuntimeGeneric lowering");
-    };
-    let checks: Vec<_> = program
-        .instrs
-        .iter()
-        .filter_map(|instr| match instr {
-            super::RuntimeInstr::BloomClassic4Check {
-                dst,
-                lanes_checked,
-                filter_slots,
-                ..
-            } => Some((*dst, *lanes_checked, filter_slots.len())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].2, 64);
-    assert_ne!(checks[0].0, checks[0].1);
-}
-
-#[test]
-fn lower_runtime_generic_join_select_builtin_emits_kernel_instr() {
-    let src =
-        "fn main() { let p: u64 = runtime_join_select_adaptive(160u64, 500000u64); exit(p); }";
-    let tokens = lex(src).expect("lex failed");
-    let program = parse(&tokens).expect("parse failed");
-    let lowered = lower_program(&program).expect("lower failed");
-    let runtime = lowered
-        .first()
-        .expect("missing lowered stmt for runtime generic");
-    let super::LoweredStmt::RuntimeGeneric { program } = runtime else {
-        panic!("expected RuntimeGeneric lowering");
-    };
-    assert!(
-        program
-            .instrs
-            .iter()
-            .any(|instr| matches!(instr, super::RuntimeInstr::JoinSelectAdaptive { .. }))
-    );
-}
-
+#[cfg(any())]
 #[test]
 fn lower_seeded_struct_latency_loop_to_special_kernel() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut i: u64 = 0u64; let mut a: u64 = 0u64; let mut b: u64 = 0u64; let mut c: u64 = 0u64; let mut d: u64 = 0u64; while i < 100u64 { state = state * 1664525u64 + 1013904223u64; a = a + state; b = b ^ state; c = c + 1u64; d = d ^ a; a = a ^ d; i = i + 1u64; } exit(a + b + c + d); }";

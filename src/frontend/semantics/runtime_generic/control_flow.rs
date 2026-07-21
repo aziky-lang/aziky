@@ -700,72 +700,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
         Ok(true)
     }
 
-    pub(super) fn try_lower_classic_bloom_check_loop(
-        &mut self,
-        cond: &Expr,
-        body: &[Stmt],
-    ) -> RuntimeGenericLowerResult<bool> {
-        let Some(spec) = parse_classic_bloom_check_loop(cond, body) else {
-            return Ok(false);
-        };
-
-        let Some((lanes_checked, lanes_mutable, lanes_ty)) = self
-            .scopes
-            .get(&spec.lane_name)
-            .and_then(RuntimeGenericBinding::as_scalar)
-        else {
-            return Ok(false);
-        };
-        let Some((dst, dst_mutable, dst_ty)) = self
-            .scopes
-            .get(&spec.result_name)
-            .and_then(RuntimeGenericBinding::as_scalar)
-        else {
-            return Ok(false);
-        };
-        let Some((hash_slot, _, hash_ty)) = self
-            .scopes
-            .get(&spec.hash_name)
-            .and_then(RuntimeGenericBinding::as_scalar)
-        else {
-            return Ok(false);
-        };
-        let Some((filter_slots, _, _filter_mutable, filter_ty, full_len_known)) = self
-            .scopes
-            .get(&spec.filter_name)
-            .and_then(RuntimeGenericBinding::as_array_slots)
-        else {
-            return Ok(false);
-        };
-
-        let u64_ty = RuntimeScalarType::Int(RuntimeIntType {
-            signed: false,
-            bits: 64,
-        });
-        if !lanes_mutable
-            || !dst_mutable
-            || lanes_ty != u64_ty
-            || dst_ty != u64_ty
-            || hash_ty != u64_ty
-            || filter_ty.signed
-            || filter_ty.bits != 64
-            || !full_len_known
-            || filter_slots.len() != 64
-        {
-            return Ok(false);
-        }
-
-        self.emit(RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash: RuntimeOperand::Slot(hash_slot),
-        });
-        self.slot_unsigned_upper_bounds.insert(dst, 1);
-        self.slot_unsigned_upper_bounds.insert(lanes_checked, 4);
-        Ok(true)
-    }
-
     pub(super) fn lower_stmt(&mut self, stmt: &Stmt) -> RuntimeGenericLowerResult<()> {
         match stmt {
             Stmt::Let {
@@ -3456,9 +3390,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
                 Ok(())
             }
             Stmt::While { cond, body, .. } => {
-                if self.try_lower_classic_bloom_check_loop(cond, body)? {
-                    return Ok(());
-                }
                 if body.len() <= 8
                     && runtime_while_body_is_straight_line(body)
                     && !runtime_while_body_contains_direct_loop_control(body)
@@ -4215,32 +4146,8 @@ impl<'a> RuntimeGenericBuilder<'a> {
                     );
                     return Ok(());
                 }
-                if name == "runtime_bloom_sbbf_insert" {
-                    if args.len() != 2 {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_bloom_sbbf_insert() expects exactly two arguments (filter, hash)",
-                            *span,
-                        )));
-                    }
-                    let filter_slots = self.resolve_runtime_kernel_u64_array_slots(
-                        "runtime_bloom_sbbf_insert",
-                        &args[0],
-                        true,
-                        *span,
-                    )?;
-                    if filter_slots.len() < 4
-                        || (filter_slots.len() & 3) != 0
-                        || !filter_slots.len().is_power_of_two()
-                    {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_bloom_sbbf_insert() requires fixed [u64; N] with N power-of-two and divisible by 4",
-                            *span,
-                        )));
-                    }
-                    let u64_ty = RuntimeIntType::new(false, 64)?;
-                    let hash = self.lower_expr_as_type(&args[1], u64_ty)?;
-                    self.emit(RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash });
-                    return Ok(());
+                if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                    return Err(RuntimeGenericLowerError::Diagnostic(diagnostic));
                 }
                 if !self.functions.contains_key(name) {
                     return Err(RuntimeGenericLowerError::Diagnostic(

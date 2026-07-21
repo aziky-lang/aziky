@@ -23,6 +23,8 @@ Methodology:
 - Backend regression tests separately ensure Aziky preserves required loops, memory effects, branches, and result lanes when those effects cannot legally be removed.
 - Rust is built with `opt-level=3`, `target-cpu=native`, `codegen-units=1`, `panic=abort`, `lto=fat`, and `overflow-checks=off`.
 - C is built with `-O3 -march=native -flto` when available, along with stripped-down unwind settings.
+- The default measurement protocol is 10 warm-up runs followed by 100 timed runs, reported per workload using the median. Pin the process to an otherwise idle core when comparing machines; the script exposes `--cpu-set` for that purpose.
+- Each workload remains independently auditable.
 
 Notes:
 - The process exit status exposes only a compact checksum, so it is never used

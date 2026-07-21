@@ -1,7 +1,7 @@
 //! Semantic orchestration and interpreter entry points.
 //!
-//! Runtime IR, specialized kernels, value sorting, and runtime-native lowering
-//! live in focused child modules. This file retains program indexing,
+//! Runtime IR, value sorting, and runtime-native lowering live in focused child
+//! modules. This file retains program indexing,
 //! monomorphization, semantic execution, and the public `lower_program` entry.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1339,66 +1339,6 @@ pub fn lower_program(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> 
         .ok_or_else(|| Diagnostic::new("missing fn main()", 0, 0))?
         .clone();
 
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_for_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_alloc_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_ring_write_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_prefix_scan_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_bloom_filter_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_sort_window_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_branch_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_branch_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_dual_state_branch_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_affine_index_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_affine_index_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_struct_latency_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_seeded_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_for_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
-    if let Some(runtime_lowered) = try_lower_runtime_while_kernel(&main)? {
-        return Ok(runtime_lowered);
-    }
-
     match try_lower_runtime_generic(&main, &index.functions, &index.struct_layouts, &index.enums)? {
         RuntimeGenericAttempt::Lowered(runtime_lowered) => return Ok(runtime_lowered),
         RuntimeGenericAttempt::Fallback { reason } => {
@@ -2293,26 +2233,11 @@ fn exec_stmt(
             exec.lowered.push(LoweredStmt::Exit(code));
             return Ok(Flow::Exit);
         }
-        Stmt::BenchLoop { iterations, span } => {
-            let value = eval_expr(iterations, ctx.env, ctx.index)?;
-            let iterations = match value {
-                Value::UInt { value, .. } => u64::try_from(value)
-                    .map_err(|_| type_error("benchloop iterations out of range", *span))?,
-                Value::Int { value, .. } => {
-                    if value < 0 {
-                        return Err(type_error(
-                            "benchloop expects a non-negative integer",
-                            *span,
-                        ));
-                    }
-                    u64::try_from(value)
-                        .map_err(|_| type_error("benchloop iterations out of range", *span))?
-                }
-                _ => return Err(type_error("benchloop expects an integer", *span)),
-            };
-            exec.lowered
-                .push(LoweredStmt::RuntimeBenchLoop { iterations });
-            return Ok(Flow::Exit);
+        Stmt::BenchLoop { span, .. } => {
+            return Err(type_error(
+                "benchloop is no longer supported; write an ordinary loop so it can be optimized through the generic runtime IR",
+                *span,
+            ));
         }
         Stmt::Block { stmts, .. } => {
             ctx.env.push();
@@ -2776,8 +2701,6 @@ fn value_has_unresolved_generic_args(value: &Value) -> bool {
     }
 }
 
-mod kernels;
-use kernels::*;
 mod runtime_generic;
 use runtime_generic::*;
 fn stmt_span(stmt: &Stmt) -> Span {
@@ -4174,7 +4097,7 @@ fn eval_expr(expr: &Expr, env: &mut Env, index: &ProgramIndex) -> Result<Value, 
             {
                 let _ = args;
                 return Err(type_error(
-                    "runtime intrinsic is runtime-only and must be lowered through runtime generic path",
+                    "benchmark kernel intrinsics are no longer available; express the algorithm with ordinary Aziky control flow so the generic optimizer can analyze it",
                     *span,
                 ));
             }

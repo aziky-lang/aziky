@@ -289,54 +289,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
             .retain(|assumption| assumption.array_name != name);
     }
 
-    pub(super) fn resolve_runtime_kernel_u64_array_slots(
-        &self,
-        kernel: &str,
-        expr: &Expr,
-        require_mutable: bool,
-        span: Span,
-    ) -> RuntimeGenericLowerResult<Vec<usize>> {
-        let Expr::Ident { name, .. } = expr else {
-            return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                format!("{kernel}() expects first argument to be an array identifier").as_str(),
-                span,
-            )));
-        };
-        let Some((slots, _len_slot, mutable, elem_ty, full_len_known)) = self
-            .scopes
-            .get(name)
-            .and_then(RuntimeGenericBinding::as_array_slots)
-        else {
-            return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                format!(
-                    "{kernel}() expects first argument to be a mutable fixed-size [u64; N] array"
-                )
-                .as_str(),
-                span,
-            )));
-        };
-        if require_mutable && !mutable {
-            return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                format!("{kernel}() requires mutable array receiver").as_str(),
-                span,
-            )));
-        }
-        let u64_ty = RuntimeIntType::new(false, 64)?;
-        if elem_ty != u64_ty {
-            return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                format!("{kernel}() requires [u64; N] array").as_str(),
-                span,
-            )));
-        }
-        if !full_len_known {
-            return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                format!("{kernel}() requires fixed-size array length").as_str(),
-                span,
-            )));
-        }
-        Ok(slots)
-    }
-
     pub(super) fn lower_runtime_owned_struct_list_method(
         &mut self,
         receiver: &str,

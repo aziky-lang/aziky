@@ -1053,6 +1053,9 @@ impl<'a> RuntimeGenericBuilder<'a> {
                 Ok(RuntimeOperand::Imm(encoded))
             }
             Expr::Call { name, span, args } => {
+                if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                    return Err(RuntimeGenericLowerError::Diagnostic(diagnostic));
+                }
                 if name == "heap_alloc" {
                     return Err(RuntimeGenericLowerError::Diagnostic(type_error(
                         "heap_alloc() is a linear resource and may only initialize a named immutable binding",
@@ -1186,91 +1189,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
                     self.normalize_slot(dst, int_ty);
                     return Ok(RuntimeOperand::Slot(dst));
                 }
-                if name == "runtime_bloom_sbbf_maybe" {
-                    if args.len() != 2 {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_bloom_sbbf_maybe() expects exactly two arguments (filter, hash)",
-                            *span,
-                        )));
-                    }
-                    let filter_slots = self.resolve_runtime_kernel_u64_array_slots(
-                        "runtime_bloom_sbbf_maybe",
-                        &args[0],
-                        true,
-                        *span,
-                    )?;
-                    if filter_slots.len() < 4
-                        || (filter_slots.len() & 3) != 0
-                        || !filter_slots.len().is_power_of_two()
-                    {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_bloom_sbbf_maybe() requires fixed [u64; N] with N power-of-two and divisible by 4",
-                            *span,
-                        )));
-                    }
-                    let u64_ty = RuntimeIntType::new(false, 64)?;
-                    let hash = self.lower_expr_as_type(&args[1], u64_ty)?;
-                    let dst = self.alloc_slot();
-                    self.emit(RuntimeInstr::BloomSplitBlockCheck {
-                        dst,
-                        filter_slots,
-                        hash,
-                    });
-                    self.normalize_slot(dst, int_ty);
-                    return Ok(RuntimeOperand::Slot(dst));
-                }
-                if name == "runtime_hash_probe_grouped16" {
-                    if args.len() != 3 {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_hash_probe_grouped16() expects exactly three arguments (ctrl, group_start, fingerprint)",
-                            *span,
-                        )));
-                    }
-                    let ctrl_slots = self.resolve_runtime_kernel_u64_array_slots(
-                        "runtime_hash_probe_grouped16",
-                        &args[0],
-                        false,
-                        *span,
-                    )?;
-                    if ctrl_slots.len() < 16 || !ctrl_slots.len().is_power_of_two() {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_hash_probe_grouped16() requires fixed [u64; N] with N power-of-two and N >= 16",
-                            *span,
-                        )));
-                    }
-                    let u64_ty = RuntimeIntType::new(false, 64)?;
-                    let group_start = self.lower_expr_as_type(&args[1], u64_ty)?;
-                    let fingerprint = self.lower_expr_as_type(&args[2], u64_ty)?;
-                    let dst_mask = self.alloc_slot();
-                    self.emit(RuntimeInstr::HashCtrlGroupProbe {
-                        dst_mask,
-                        ctrl_slots,
-                        group_start,
-                        fingerprint,
-                    });
-                    self.normalize_slot(dst_mask, int_ty);
-                    return Ok(RuntimeOperand::Slot(dst_mask));
-                }
-                if name == "runtime_join_select_adaptive" {
-                    if args.len() != 2 {
-                        return Err(RuntimeGenericLowerError::Diagnostic(type_error(
-                            "runtime_join_select_adaptive() expects exactly two arguments (build_rows, probe_rows)",
-                            *span,
-                        )));
-                    }
-                    let u64_ty = RuntimeIntType::new(false, 64)?;
-                    let build_rows = self.lower_expr_as_type(&args[0], u64_ty)?;
-                    let probe_rows = self.lower_expr_as_type(&args[1], u64_ty)?;
-                    let dst = self.alloc_slot();
-                    self.emit(RuntimeInstr::JoinSelectAdaptive {
-                        dst,
-                        build_rows,
-                        probe_rows,
-                    });
-                    self.normalize_slot(dst, int_ty);
-                    return Ok(RuntimeOperand::Slot(dst));
-                }
-
                 if !self.functions.contains_key(name) {
                     return Err(RuntimeGenericLowerError::Diagnostic(
                         unknown_function_diagnostic(name, *span),
@@ -1906,6 +1824,9 @@ impl<'a> RuntimeGenericBuilder<'a> {
                 ))
             }
             Expr::Call { name, span, .. } => {
+                if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                    return Err(RuntimeGenericLowerError::Diagnostic(diagnostic));
+                }
                 if matches!(
                     name.as_str(),
                     "runtime_seed"
@@ -1926,12 +1847,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
                         "heap_free() does not return a value",
                         *span,
                     )));
-                }
-                if name == "runtime_bloom_sbbf_maybe"
-                    || name == "runtime_hash_probe_grouped16"
-                    || name == "runtime_join_select_adaptive"
-                {
-                    return Ok(RuntimeScalarType::Int(RuntimeIntType::new(false, 64)?));
                 }
                 let function = self.functions.get(name).ok_or_else(|| {
                     RuntimeGenericLowerError::Diagnostic(unknown_function_diagnostic(name, *span))
@@ -2403,6 +2318,9 @@ impl<'a> RuntimeGenericBuilder<'a> {
                 }
             }
             Expr::Call { name, span, .. } => {
+                if let Some(diagnostic) = removed_benchmark_kernel_diagnostic(name, *span) {
+                    return Err(RuntimeGenericLowerError::Diagnostic(diagnostic));
+                }
                 if matches!(
                     name.as_str(),
                     "runtime_seed"
@@ -2421,11 +2339,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
                         "heap_free() does not return a value",
                         *span,
                     )))
-                } else if name == "runtime_bloom_sbbf_maybe"
-                    || name == "runtime_hash_probe_grouped16"
-                    || name == "runtime_join_select_adaptive"
-                {
-                    RuntimeIntType::new(false, 64)
                 } else {
                     let function = self.functions.get(name).ok_or_else(|| {
                         RuntimeGenericLowerError::Diagnostic(unknown_function_diagnostic(

@@ -109,7 +109,7 @@ fn main() {
 
 Aziky compiles source code directly to x86_64 machine code. The compiler handles all stages of compilation internally, producing a standalone executable binary.
 
-The implementation currently has three lowering outcomes: specialized runtime kernels, a general slot-based runtime IR, and deterministic semantic evaluation used as a fallback for supported constructs that are not runtime-native yet. The long-term goal is for ordinary application code to use the general runtime path without fallback.
+The implementation has two lowering outcomes: a general slot-based runtime IR and deterministic semantic evaluation used as a fallback for supported constructs that are not runtime-native yet. Ordinary programs, including the benchmark workloads, use the general runtime path whenever they need native runtime services.
 
 ## 1.5 Multi-File Modules
 
@@ -1307,7 +1307,7 @@ The `runtime_seed()` expression provides a runtime-determined seed value.
 runtime-seed-expression ::= 'runtime_seed' '(' ')'
 ```
 
-**Purpose**: Provides non-deterministic input for benchmark kernels.
+**Purpose**: Provides non-deterministic input for ordinary applications and simulations.
 
 **Rules**:
 1. Takes no arguments

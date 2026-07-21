@@ -2232,7 +2232,6 @@ fn unroll_runtime_small_counted_loops_in_program(instrs: &mut Vec<RuntimeInstr>)
 }
 
 fn eliminate_runtime_loop_bounds_checks_in_program(program: &mut RuntimeProgram) {
-    select_grouped_hash_probe_loops(&mut program.instrs, &mut program.slots);
     let loops = find_canonical_counted_loops(&program.instrs);
     for info in loops {
         if info.header + 1 > info.update_idx {
@@ -2642,148 +2641,6 @@ fn loop_has_external_entry_to_header(instrs: &[RuntimeInstr], info: CountedLoopI
         }
     }
     false
-}
-
-fn try_select_grouped_hash_probe_loop(
-    instrs: &mut Vec<RuntimeInstr>,
-    slots: &mut usize,
-    info: CountedLoopInfo,
-) -> bool {
-    let LoopLimit::Imm(limit) = info.limit else {
-        return false;
-    };
-    if info.start != 0 || limit != 16 || loop_has_external_entry_to_header(instrs, info) {
-        return false;
-    }
-    if info.header + 1 > info.update_idx
-        || info.update_idx > info.latch
-        || info.latch >= instrs.len()
-    {
-        return false;
-    }
-
-    let body_start = info.header + 1;
-    let body_end = info.update_idx;
-    for cmp_idx in body_start..body_end {
-        let (load_slot, fingerprint) = match instrs[cmp_idx] {
-            RuntimeInstr::JumpIfCmpFalse {
-                op: RuntimeCmpOp::Eq,
-                lhs: RuntimeOperand::Slot(slot),
-                rhs,
-                ..
-            } => (slot, rhs),
-            RuntimeInstr::JumpIfCmpFalse {
-                op: RuntimeCmpOp::Eq,
-                lhs,
-                rhs: RuntimeOperand::Slot(slot),
-                ..
-            } => (slot, lhs),
-            _ => continue,
-        };
-        if matches!(fingerprint, RuntimeOperand::Imm(0))
-            || !runtime_operand_loop_invariant(instrs, info, fingerprint)
-        {
-            continue;
-        }
-        let Some(load_idx) = slot_def_idx_in_loop_body(instrs, body_start, cmp_idx, load_slot)
-        else {
-            continue;
-        };
-        let (base_slots, index) = match &instrs[load_idx] {
-            RuntimeInstr::LoadIndex {
-                dst,
-                base_slots,
-                index,
-            }
-            | RuntimeInstr::LoadIndexUnchecked {
-                dst,
-                base_slots,
-                index,
-            } if *dst == load_slot => (base_slots.clone(), *index),
-            _ => continue,
-        };
-        if base_slots.len() < 16 || !base_slots.len().is_power_of_two() {
-            continue;
-        }
-        let group_start = match derive_group_start_for_grouped_probe(
-            instrs,
-            info,
-            load_idx,
-            base_slots.len(),
-            index,
-        ) {
-            Some(value) => value,
-            None => continue,
-        };
-        if (load_idx + 1..cmp_idx).any(|idx| runtime_instr_writes_slot(&instrs[idx], load_slot)) {
-            continue;
-        }
-        if (cmp_idx + 1..body_end).any(|idx| runtime_instr_reads_slot(&instrs[idx], load_slot)) {
-            continue;
-        }
-
-        let mask_slot = *slots;
-        *slots += 1;
-        instrs.insert(
-            info.header,
-            RuntimeInstr::HashCtrlGroupProbe {
-                dst_mask: mask_slot,
-                ctrl_slots: base_slots,
-                group_start,
-                fingerprint,
-            },
-        );
-        bump_runtime_targets_from(instrs, info.header, 1);
-        let cmp_idx = cmp_idx + 1;
-
-        instrs.insert(
-            cmp_idx,
-            RuntimeInstr::BinOp {
-                dst: load_slot,
-                op: RuntimeBinOp::ShrUnsigned,
-                lhs: RuntimeOperand::Slot(mask_slot),
-                rhs: RuntimeOperand::Slot(info.ind_slot),
-            },
-        );
-        bump_runtime_targets_from(instrs, cmp_idx, 1);
-        instrs.insert(
-            cmp_idx + 1,
-            RuntimeInstr::BinOpInPlace {
-                dst: load_slot,
-                op: RuntimeBinOp::BitAnd,
-                rhs: RuntimeOperand::Imm(1),
-            },
-        );
-        bump_runtime_targets_from(instrs, cmp_idx + 1, 1);
-        let target = match instrs[cmp_idx + 2] {
-            RuntimeInstr::JumpIfCmpFalse { target, .. } => target,
-            _ => continue,
-        };
-        instrs[cmp_idx + 2] = RuntimeInstr::JumpIfCmpFalse {
-            op: RuntimeCmpOp::Eq,
-            lhs: RuntimeOperand::Slot(load_slot),
-            rhs: RuntimeOperand::Imm(1),
-            target,
-        };
-        return true;
-    }
-    false
-}
-
-fn select_grouped_hash_probe_loops(instrs: &mut Vec<RuntimeInstr>, slots: &mut usize) {
-    for _ in 0..8 {
-        let loops = find_relaxed_counted_loops(instrs);
-        let mut changed = false;
-        for info in loops {
-            if try_select_grouped_hash_probe_loop(instrs, slots, info) {
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
 }
 
 fn find_relaxed_counted_loops(instrs: &[RuntimeInstr]) -> Vec<CountedLoopInfo> {
@@ -6036,6 +5893,7 @@ fn const_fold(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
 }
 
 fn dead_print_elimination(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    /*
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
@@ -6257,9 +6115,27 @@ fn dead_print_elimination(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
         }
     }
     out
+    */
+    let mut out = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            LoweredStmt::Print(text) if !text.is_empty() => out.push(LoweredStmt::Print(text)),
+            LoweredStmt::Print(_) => {}
+            LoweredStmt::Exit(code) => {
+                out.push(LoweredStmt::Exit(code));
+                break;
+            }
+            LoweredStmt::RuntimeGeneric { program } => {
+                out.push(LoweredStmt::RuntimeGeneric { program });
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn fold_runtime_kernels(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    /*
     let mut out = Vec::with_capacity(stmts.len());
     for stmt in stmts {
         match stmt {
@@ -6439,6 +6315,8 @@ fn fold_runtime_kernels(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
         }
     }
     out
+    */
+    stmts
 }
 
 fn affine_pow(mut mul: u64, mut add: u64, mut exp: u64) -> (u64, u64) {

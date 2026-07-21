@@ -14,8 +14,8 @@ runs each binary separately, and prints Aziky vs Rust vs optimized C timings.
 USAGE
 }
 
-runs=20
-warmup=3
+runs=100
+warmup=10
 csv_out=""
 cpu_set="${AZIKY_BENCH_CPU_SET:-}"
 rt_prio="${AZIKY_BENCH_RT_PRIO:-}"
@@ -24,6 +24,7 @@ trim_pct="${AZIKY_BENCH_TRIM_PCT:-10}"
 perf_counters="${AZIKY_BENCH_PERF_COUNTERS:-0}"
 perf_runs="${AZIKY_BENCH_PERF_RUNS:-3}"
 perf_events="${AZIKY_BENCH_PERF_EVENTS:-cycles,instructions,branches,branch-misses,cache-misses}"
+scenario_index=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -173,11 +174,6 @@ fi
 printf "\n%-20s %11s %11s %11s %11s %11s\n" "scenario" "aziky_ms" "rust_ms" "c_ms" "rust/azk" "c/azk"
 printf "%-20s %11s %11s %11s %11s %11s\n" "--------------------" "-----------" "-----------" "-----------" "-----------" "-----------"
 
-sum_rust_speedup=0
-sum_c_speedup=0
-product_rust_speedup=1
-product_c_speedup=1
-count=0
 
 timer_args=(
     --runs "$runs"
@@ -307,7 +303,7 @@ for scenario in "${scenarios[@]}"; do
 
     # Rotate the execution order to distribute thermal/frequency bias instead
     # of always favoring or penalizing the same implementation.
-    case $((count % 3)) in
+    case $((scenario_index % 3)) in
         0)
             azk_report=$(scripts/time_binary.sh "$azk_bin" "${timer_args[@]}" --label "aziky_$scenario")
             rust_report=$(scripts/time_binary.sh "$rust_bin" "${timer_args[@]}" --label "rust_$scenario")
@@ -356,30 +352,10 @@ for scenario in "${scenarios[@]}"; do
             "$rust_cycles" "$rust_instructions" "$rust_ipc" "$rust_branch_miss_pct" "$rust_cache_misses_per_kinst" \
             "$c_cycles" "$c_instructions" "$c_ipc" "$c_branch_miss_pct" "$c_cache_misses_per_kinst" >>"$csv_out"
     fi
+    scenario_index=$((scenario_index + 1))
 
-    sum_rust_speedup=$(awk -v s="$sum_rust_speedup" -v x="$rust_speedup" 'BEGIN { printf "%.9f", s + x }')
-    sum_c_speedup=$(awk -v s="$sum_c_speedup" -v x="$c_speedup" 'BEGIN { printf "%.9f", s + x }')
-    product_rust_speedup=$(awk -v p="$product_rust_speedup" -v x="$rust_speedup" 'BEGIN { printf "%.12g", p * x }')
-    product_c_speedup=$(awk -v p="$product_c_speedup" -v x="$c_speedup" 'BEGIN { printf "%.12g", p * x }')
-    count=$((count + 1))
 done
 
-if [[ "$count" -gt 0 ]]; then
-    avg_rust_speedup=$(awk -v s="$sum_rust_speedup" -v n="$count" 'BEGIN { printf "%.3f", s / n }')
-    avg_c_speedup=$(awk -v s="$sum_c_speedup" -v n="$count" 'BEGIN { printf "%.3f", s / n }')
-    geomean_rust_speedup=$(awk -v p="$product_rust_speedup" -v n="$count" 'BEGIN { printf "%.3f", exp(log(p) / n) }')
-    geomean_c_speedup=$(awk -v p="$product_c_speedup" -v n="$count" 'BEGIN { printf "%.3f", exp(log(p) / n) }')
-    printf "\navg_rust_over_aziky=%sx (%s scenarios)\n" "$avg_rust_speedup" "$count"
-    printf "avg_c_over_aziky=%sx (%s scenarios)\n" "$avg_c_speedup" "$count"
-    printf "geomean_rust_over_aziky=%sx (%s scenarios)\n" "$geomean_rust_speedup" "$count"
-    printf "geomean_c_over_aziky=%sx (%s scenarios)\n" "$geomean_c_speedup" "$count"
-    if [[ -n "$csv_out" ]]; then
-        printf "%s,,,,%s,%s,%s,%s,%s,%s,%s,%s,%s,,,,,,,,,,,,,,,,,\n" \
-            "AVERAGE" "$avg_rust_speedup" "$avg_c_speedup" "$runs" "$warmup" "$c_compiler" \
-            "$score_stat" "$trim_pct" "${cpu_set:-none}" "${rt_prio:-none}" >>"$csv_out"
-        printf "%s,,,,%s,%s,%s,%s,%s,%s,%s,%s,%s,,,,,,,,,,,,,,,,,\n" \
-            "GEOMEAN" "$geomean_rust_speedup" "$geomean_c_speedup" "$runs" "$warmup" "$c_compiler" \
-            "$score_stat" "$trim_pct" "${cpu_set:-none}" "${rt_prio:-none}" >>"$csv_out"
-        echo "csv_report=$csv_out"
-    fi
+if [[ -n "$csv_out" ]]; then
+    echo "csv_report=$csv_out"
 fi

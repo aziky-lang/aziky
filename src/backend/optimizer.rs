@@ -18,6 +18,31 @@ pub struct OptimizationReport {
     pub repaired_fallthroughs: usize,
 }
 
+impl OptimizationReport {
+    /// Stable, line-oriented JSON for `--dump-lir` consumers.
+    ///
+    /// Every counter is paired with the proof class required by its pass, so
+    /// a performance artifact can be audited without relying on source names
+    /// or benchmark constants.
+    pub fn machine_readable(&self) -> String {
+        format!(
+            concat!(
+                "optimization-report {{\"version\":1,\"pipeline\":\"runtime-generic\",",
+                "\"passes\":[",
+                "{{\"name\":\"copy-propagation\",\"applied\":{},\"precondition\":\"single-assignment, dominated, non-addressable\"}},",
+                "{{\"name\":\"verified-rewrite\",\"applied\":{},\"precondition\":\"target-independent scalar equivalence\"}},",
+                "{{\"name\":\"pure-region-scheduling\",\"applied\":{},\"precondition\":\"no memory effects or control dependence\"}},",
+                "{{\"name\":\"cfg-layout\",\"applied\":{},\"precondition\":\"profile matches the current control-flow graph\"}}",
+                "]}}\n"
+            ),
+            self.propagated_copies + self.eliminated_copies,
+            self.verified_rewrites,
+            self.scheduled_regions,
+            self.reordered_blocks + self.inverted_branches + self.repaired_fallthroughs,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OptimizedRuntimeProgram {
     pub program: RuntimeProgram,

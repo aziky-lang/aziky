@@ -303,7 +303,7 @@ Every implementation phase must include the applicable checks:
 - Unit tests for pure transformations and safety rules.
 - Byte-level tests for machine encoding and object layout.
 - Compile-and-execute integration tests.
-- Semantic-equivalence tests for specialized kernels.
+- Differential semantic-equivalence tests for general runtime-IR optimization passes.
 - Repeated-emission hash checks for determinism.
 - Cross-language checksum parity before performance measurement.
 
@@ -326,7 +326,7 @@ Non-negotiable rules:
 
 - No optimization may weaken borrow, ownership, or linear-resource guarantees.
 - No profile-guided transform may make output depend on timing, iteration order, or unstable maps.
-- Specialized kernels require exact arithmetic reasoning and regression tests against scalar semantics.
+- Local IR rewrites require explicit preconditions, exact arithmetic reasoning, and regression tests against scalar semantics.
 - Benchmark programs must pass cross-language result parity before their timings count.
 - Benchmark-only observability limits do not justify changing the source workload asymmetrically. Every implementation must retain the same workload contract; once parity is established, each compiler remains free to apply any semantics-preserving optimization.
 - Target-specific vector paths must have deterministic feature selection and scalar/SSE fallbacks where promised.
