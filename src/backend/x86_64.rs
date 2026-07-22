@@ -594,21 +594,6 @@ fn mark_force_stack(force_stack: &mut [bool], instr: &RuntimeInstr) {
                 }
             }
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. }
-        | RuntimeInstr::BloomSplitBlockCheck { filter_slots, .. } => {
-            for &slot in filter_slots {
-                if let Some(entry) = force_stack.get_mut(slot) {
-                    *entry = true;
-                }
-            }
-        }
-        RuntimeInstr::HashCtrlGroupProbe { ctrl_slots, .. } => {
-            for &slot in ctrl_slots {
-                if let Some(entry) = force_stack.get_mut(slot) {
-                    *entry = true;
-                }
-            }
-        }
         _ => {}
     }
 }
@@ -646,65 +631,6 @@ fn runtime_cmp_jumpifzero_fusion_candidate(
         return None;
     }
     Some((op, lhs, rhs, target))
-}
-
-struct RuntimeBloomClassic4JumpFusion {
-    filter_slots: Vec<usize>,
-    hash: RuntimeOperand,
-    target: usize,
-}
-
-fn runtime_bloom_classic4_jump_fusion_candidate(
-    program: &RuntimeProgram,
-    idx: usize,
-    has_incoming_target: &[bool],
-) -> Option<RuntimeBloomClassic4JumpFusion> {
-    if idx + 1 >= program.instrs.len() || has_incoming_target.get(idx + 1).copied().unwrap_or(false)
-    {
-        return None;
-    }
-
-    let (dst, lanes_checked, filter_slots, hash) = match &program.instrs[idx] {
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => (*dst, *lanes_checked, filter_slots.clone(), *hash),
-        _ => return None,
-    };
-    let (op, lhs, rhs, target) = match &program.instrs[idx + 1] {
-        RuntimeInstr::JumpIfCmpFalse {
-            op,
-            lhs,
-            rhs,
-            target,
-        } => (*op, *lhs, *rhs, *target),
-        _ => return None,
-    };
-    let checks_success = op == RuntimeCmpOp::Eq
-        && (matches!((lhs, rhs), (RuntimeOperand::Slot(slot), RuntimeOperand::Imm(1)) if slot == dst)
-            || matches!((lhs, rhs), (RuntimeOperand::Imm(1), RuntimeOperand::Slot(slot)) if slot == dst));
-    if !checks_success {
-        return None;
-    }
-
-    // The fused instruction branches before materializing either source-level
-    // loop variable.  That is legal only when the branch is the final reader
-    // of `dst` and the lane counter is not observed anywhere.
-    if runtime_slot_read_before_write(program, idx + 2, dst)
-        || program.instrs.iter().enumerate().any(|(other_idx, instr)| {
-            other_idx != idx && runtime_instr_reads_slot(instr, lanes_checked)
-        })
-    {
-        return None;
-    }
-
-    Some(RuntimeBloomClassic4JumpFusion {
-        filter_slots,
-        hash,
-        target,
-    })
 }
 
 struct RuntimeBitTestBoolFusion {
@@ -769,6 +695,27 @@ struct RuntimeBitTestIndexedFusion {
     index: RuntimeOperand,
     bit: RuntimeOperand,
     checked: bool,
+}
+
+struct RuntimeBitTestAccumulateFusion {
+    dst: usize,
+    suppressed_copy: Option<usize>,
+    accumulator: RuntimeOperand,
+    accumulator_is_boolean: bool,
+    base_slots: Vec<usize>,
+    index: RuntimeOperand,
+    bit: RuntimeOperand,
+    index_expression: Option<RuntimeMaskedShiftExpression>,
+    bit_expression: Option<RuntimeMaskedShiftExpression>,
+    checked: bool,
+}
+
+#[derive(Clone)]
+struct RuntimeMaskedShiftExpression {
+    base: RuntimeOperand,
+    shift: u8,
+    mask: u64,
+    suppressed_instrs: Vec<usize>,
 }
 
 struct RuntimeLoadIndexCmpJumpFusion {
@@ -896,6 +843,345 @@ fn runtime_bit_test_indexed_fusion_candidate(
     })
 }
 
+/// Fuse an indexed bit extraction immediately consumed by boolean AND.
+///
+/// This is a local scalar identity:
+/// `acc & ((array[index] >> bit) & 1)` equals
+/// `acc & bit_test(array[index], bit)`.  The liveness checks below are the
+/// proof that none of the eliminated materialized temporaries are observable.
+fn runtime_bit_test_accumulate_fusion_candidate(
+    program: &RuntimeProgram,
+    idx: usize,
+    has_incoming_target: &[bool],
+) -> Option<RuntimeBitTestAccumulateFusion> {
+    let bit_test = runtime_bit_test_indexed_fusion_candidate(program, idx, has_incoming_target)?;
+    if idx + 3 >= program.instrs.len() || has_incoming_target.get(idx + 3).copied().unwrap_or(false)
+    {
+        return None;
+    }
+
+    let (dst, accumulator) = match &program.instrs[idx + 3] {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs,
+            rhs,
+        } => match (*lhs, *rhs) {
+            (RuntimeOperand::Slot(slot), accumulator) if slot == bit_test.dst => {
+                (*dst, accumulator)
+            }
+            (accumulator, RuntimeOperand::Slot(slot)) if slot == bit_test.dst => {
+                (*dst, accumulator)
+            }
+            _ => return None,
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            rhs: RuntimeOperand::Slot(slot),
+        } if *slot == bit_test.dst => (*dst, RuntimeOperand::Slot(*dst)),
+        _ => return None,
+    };
+
+    if runtime_slot_read_before_write(program, idx + 4, bit_test.dst) {
+        return None;
+    }
+    let mut final_dst = dst;
+    let mut suppressed_copy = None;
+    for copy in idx + 4..(idx + 9).min(program.instrs.len()) {
+        if has_incoming_target.get(copy).copied().unwrap_or(false)
+            || matches!(
+                program.instrs[copy],
+                RuntimeInstr::Jump { .. }
+                    | RuntimeInstr::JumpIfZero { .. }
+                    | RuntimeInstr::JumpIfCmpFalse { .. }
+                    | RuntimeInstr::Call { .. }
+                    | RuntimeInstr::Return
+                    | RuntimeInstr::Exit { .. }
+            )
+        {
+            break;
+        }
+        let RuntimeInstr::Mov {
+            dst: destination,
+            src: RuntimeOperand::Slot(source),
+        } = program.instrs[copy]
+        else {
+            continue;
+        };
+        if source != dst || destination == dst {
+            continue;
+        }
+        if program.instrs[idx + 4..copy].iter().any(|instr| {
+            runtime_instr_reads_slot(instr, dst)
+                || runtime_instr_writes_slot(instr, dst)
+                || runtime_instr_reads_slot(instr, destination)
+                || runtime_instr_writes_slot(instr, destination)
+        }) || runtime_slot_read_before_write(program, copy + 1, dst)
+        {
+            continue;
+        }
+        final_dst = destination;
+        suppressed_copy = Some(copy);
+        break;
+    }
+
+    let accumulator_is_boolean =
+        runtime_operand_is_boolean_before(program, idx + 3, accumulator, has_incoming_target, 0);
+    let index_expression = runtime_masked_shift_expression_before(
+        program,
+        idx,
+        bit_test.index,
+        idx,
+        has_incoming_target,
+    )
+    .filter(|expression| {
+        bit_test.base_slots.len().is_power_of_two()
+            && expression.mask == bit_test.base_slots.len().saturating_sub(1) as u64
+            && u32::try_from(expression.mask).is_ok()
+    });
+    let bit_expression = runtime_masked_shift_expression_before(
+        program,
+        idx,
+        bit_test.bit,
+        idx + 1,
+        has_incoming_target,
+    )
+    .filter(|expression| expression.mask == 63);
+    Some(RuntimeBitTestAccumulateFusion {
+        dst: final_dst,
+        suppressed_copy,
+        accumulator,
+        accumulator_is_boolean,
+        base_slots: bit_test.base_slots,
+        index: bit_test.index,
+        bit: bit_test.bit,
+        index_expression,
+        bit_expression,
+        checked: bit_test.checked,
+    })
+}
+
+fn runtime_masked_shift_expression_before(
+    program: &RuntimeProgram,
+    before: usize,
+    operand: RuntimeOperand,
+    final_consumer: usize,
+    has_incoming_target: &[bool],
+) -> Option<RuntimeMaskedShiftExpression> {
+    let RuntimeOperand::Slot(mut masked_slot) = operand else {
+        return None;
+    };
+    let mut search_before = before;
+    let mut consumer = final_consumer;
+    let mut suppressed_instrs = Vec::new();
+    let mask_def = loop {
+        let definition = (0..search_before)
+            .rev()
+            .find(|index| runtime_instr_writes_slot(&program.instrs[*index], masked_slot))?;
+        if has_incoming_target
+            .get(definition)
+            .copied()
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        suppressed_instrs.extend(runtime_slot_dead_copy_reads_except(
+            program,
+            masked_slot,
+            definition + 1,
+            consumer,
+        )?);
+        match program.instrs[definition] {
+            RuntimeInstr::Mov {
+                dst,
+                src: RuntimeOperand::Slot(source),
+            } if dst == masked_slot && source != masked_slot => {
+                suppressed_instrs.push(definition);
+                masked_slot = source;
+                search_before = definition;
+                consumer = definition;
+            }
+            _ => break definition,
+        }
+    };
+    if has_incoming_target.get(mask_def).copied().unwrap_or(false) {
+        return None;
+    }
+    let (unmasked_slot, mask) = match &program.instrs[mask_def] {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(slot),
+            rhs: RuntimeOperand::Imm(mask),
+        }
+        | RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Imm(mask),
+            rhs: RuntimeOperand::Slot(slot),
+        } if *dst == masked_slot => (*slot, *mask),
+        _ => return None,
+    };
+    let source_def = (0..mask_def)
+        .rev()
+        .find(|index| runtime_instr_writes_slot(&program.instrs[*index], unmasked_slot))?;
+    if has_incoming_target
+        .get(source_def)
+        .copied()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    suppressed_instrs.extend(runtime_slot_dead_copy_reads_except(
+        program,
+        unmasked_slot,
+        source_def + 1,
+        mask_def,
+    )?);
+    let (base, shift) = match &program.instrs[source_def] {
+        RuntimeInstr::Mov { dst, src } if *dst == unmasked_slot => (*src, 0),
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::ShrUnsigned,
+            lhs,
+            rhs: RuntimeOperand::Imm(shift),
+        } if *dst == unmasked_slot && *shift < 64 => (*lhs, *shift as u8),
+        _ => return None,
+    };
+    if matches!(base, RuntimeOperand::Slot(slot) if slot == unmasked_slot || slot == masked_slot) {
+        return None;
+    }
+    suppressed_instrs.extend([source_def, mask_def]);
+    suppressed_instrs.sort_unstable();
+    Some(RuntimeMaskedShiftExpression {
+        base,
+        shift,
+        mask,
+        suppressed_instrs,
+    })
+}
+
+/// Return extra reads that are themselves globally dead scalar copies.
+///
+/// The permitted consumer is the selected expression edge. Any other read
+/// blocks folding unless it is `dead = source` and `dead` is never read by any
+/// instruction in the whole runtime program. This deliberately stronger-than-
+/// local proof remains sound across calls, returns, loop backedges, and merges.
+fn runtime_slot_dead_copy_reads_except(
+    program: &RuntimeProgram,
+    slot: usize,
+    start: usize,
+    allowed_read: usize,
+) -> Option<Vec<usize>> {
+    let mut dead_copies = Vec::new();
+    for index in start..program.instrs.len() {
+        let instr = &program.instrs[index];
+        if runtime_instr_reads_slot(instr, slot) && index != allowed_read {
+            let RuntimeInstr::Mov {
+                dst,
+                src: RuntimeOperand::Slot(source),
+            } = instr
+            else {
+                return None;
+            };
+            if *source != slot
+                || program
+                    .instrs
+                    .iter()
+                    .any(|candidate| runtime_instr_reads_slot(candidate, *dst))
+            {
+                return None;
+            }
+            dead_copies.push(index);
+        }
+        if runtime_instr_writes_slot(instr, slot) {
+            return Some(dead_copies);
+        }
+    }
+    Some(dead_copies)
+}
+
+/// Prove that an operand is in `{0, 1}` from local, dominating definitions.
+/// The walk never crosses a merge point and accepts only operations whose
+/// scalar result is unconditionally boolean.
+fn runtime_operand_is_boolean_before(
+    program: &RuntimeProgram,
+    before: usize,
+    operand: RuntimeOperand,
+    has_incoming_target: &[bool],
+    depth: usize,
+) -> bool {
+    if has_incoming_target.get(before).copied().unwrap_or(false) {
+        return false;
+    }
+    match operand {
+        RuntimeOperand::Imm(value) => return value <= 1,
+        RuntimeOperand::Slot(_) if depth >= 12 => return false,
+        RuntimeOperand::Slot(_) => {}
+    }
+    let RuntimeOperand::Slot(slot) = operand else {
+        return false;
+    };
+    for index in (0..before).rev() {
+        if index + 1 < before && has_incoming_target.get(index + 1).copied().unwrap_or(false) {
+            return false;
+        }
+        let instr = &program.instrs[index];
+        if !runtime_instr_writes_slot(instr, slot) {
+            if matches!(
+                instr,
+                RuntimeInstr::Jump { .. }
+                    | RuntimeInstr::JumpIfZero { .. }
+                    | RuntimeInstr::JumpIfCmpFalse { .. }
+                    | RuntimeInstr::Call { .. }
+                    | RuntimeInstr::Return
+                    | RuntimeInstr::Exit { .. }
+            ) {
+                return false;
+            }
+            continue;
+        }
+        return match instr {
+            RuntimeInstr::Cmp { dst, .. } if *dst == slot => true,
+            RuntimeInstr::Mov { dst, src } if *dst == slot => runtime_operand_is_boolean_before(
+                program,
+                index,
+                *src,
+                has_incoming_target,
+                depth + 1,
+            ),
+            RuntimeInstr::BinOp {
+                dst,
+                op: RuntimeBinOp::BitAnd,
+                lhs,
+                rhs,
+            } if *dst == slot => {
+                runtime_operand_is_boolean_before(
+                    program,
+                    index,
+                    *lhs,
+                    has_incoming_target,
+                    depth + 1,
+                ) || runtime_operand_is_boolean_before(
+                    program,
+                    index,
+                    *rhs,
+                    has_incoming_target,
+                    depth + 1,
+                )
+            }
+            RuntimeInstr::BinOpInPlace {
+                dst,
+                op: RuntimeBinOp::BitAnd,
+                rhs: RuntimeOperand::Imm(1),
+            } if *dst == slot => true,
+            _ => false,
+        };
+    }
+    false
+}
+
 fn runtime_load_index_cmp_jump_fusion_candidate(
     program: &RuntimeProgram,
     idx: usize,
@@ -976,6 +1262,130 @@ struct RuntimeIndexIncrementFusion {
 struct RuntimeExactUnrollEmissionPlan {
     suppress_guard: Vec<bool>,
     induction_increment: Vec<Option<u64>>,
+}
+
+struct RuntimeCountedLoopEmissionPlan {
+    initializer_count: Vec<Option<u64>>,
+    suppress_instr: Vec<bool>,
+    latch: Vec<Option<(usize, usize)>>,
+}
+
+/// Select a countdown latch for a canonical fixed-trip loop when its induction
+/// value has no meaning outside loop control. The proof is intentionally
+/// global for the induction slot: no body, post-loop, call, or return path may
+/// observe it. This changes only machine loop control, never target-neutral IR.
+fn runtime_counted_loop_emission_plan(program: &RuntimeProgram) -> RuntimeCountedLoopEmissionPlan {
+    let mut plan = RuntimeCountedLoopEmissionPlan {
+        initializer_count: vec![None; program.instrs.len()],
+        suppress_instr: vec![false; program.instrs.len()],
+        latch: vec![None; program.instrs.len()],
+    };
+    for (latch, instr) in program.instrs.iter().enumerate() {
+        let RuntimeInstr::Jump { target: header } = instr else {
+            continue;
+        };
+        if *header == 0 || *header >= latch || latch + 1 >= program.instrs.len() {
+            continue;
+        }
+        let initializer = *header - 1;
+        let (induction, start) = match program.instrs[initializer] {
+            RuntimeInstr::Mov {
+                dst,
+                src: RuntimeOperand::Imm(start),
+            } => (dst, start),
+            _ => continue,
+        };
+        let limit = match program.instrs[*header] {
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(slot),
+                rhs: RuntimeOperand::Imm(limit),
+                target,
+            } if slot == induction && target == latch + 1 && start < limit => limit,
+            _ => continue,
+        };
+
+        let has_other_entry = program.instrs.iter().enumerate().any(|(index, candidate)| {
+            if index == latch {
+                return false;
+            }
+            matches!(
+                candidate,
+                RuntimeInstr::Jump { target }
+                    | RuntimeInstr::JumpIfZero { target, .. }
+                    | RuntimeInstr::JumpIfCmpFalse { target, .. }
+                    | RuntimeInstr::Call { target }
+                    | RuntimeInstr::ThreadSpawn { target, .. }
+                    if *target == *header
+            )
+        });
+        if has_other_entry {
+            continue;
+        }
+
+        let mut increments = Vec::new();
+        let mut step = 0u64;
+        let mut valid = true;
+        for index in *header + 1..latch {
+            match program.instrs[index] {
+                RuntimeInstr::Jump { target } if target == index + 1 => {}
+                RuntimeInstr::BinOpInPlace {
+                    dst,
+                    op: RuntimeBinOp::Add,
+                    rhs: RuntimeOperand::Imm(amount),
+                } if dst == induction && amount > 0 => {
+                    let Some(next) = step.checked_add(amount) else {
+                        valid = false;
+                        break;
+                    };
+                    step = next;
+                    increments.push(index);
+                }
+                ref candidate
+                    if runtime_instr_reads_slot(candidate, induction)
+                        || runtime_instr_writes_slot(candidate, induction) =>
+                {
+                    valid = false;
+                    break;
+                }
+                RuntimeInstr::Jump { .. }
+                | RuntimeInstr::JumpIfZero { .. }
+                | RuntimeInstr::JumpIfCmpFalse { .. }
+                | RuntimeInstr::Call { .. }
+                | RuntimeInstr::Return
+                | RuntimeInstr::Exit { .. }
+                | RuntimeInstr::ThreadSpawn { .. } => {
+                    valid = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !valid || step == 0 {
+            continue;
+        }
+        if program.instrs.iter().enumerate().any(|(index, candidate)| {
+            index != *header
+                && !increments.contains(&index)
+                && runtime_instr_reads_slot(candidate, induction)
+        }) {
+            continue;
+        }
+        let distance = limit - start;
+        let iterations = distance.div_ceil(step);
+        let final_value = start as u128 + iterations as u128 * step as u128;
+        if iterations == 0 || final_value > u64::MAX as u128 {
+            continue;
+        }
+
+        plan.initializer_count[initializer] = Some(iterations);
+        plan.suppress_instr[*header] = true;
+        for increment in increments {
+            plan.suppress_instr[increment] = true;
+        }
+        plan.latch[latch] = Some((induction, *header));
+    }
+    plan
 }
 
 /// Keeps the IR guards that define basic blocks and SSA lifetimes, but omits
@@ -1145,6 +1555,133 @@ struct RuntimeU32AffineFusion {
     narrowed_slot: usize,
     state_slot: Option<usize>,
     consumed: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeAffineSelectFusion {
+    cmp_op: RuntimeCmpOp,
+    cmp_lhs: RuntimeOperand,
+    cmp_rhs: RuntimeOperand,
+    state_slot: usize,
+    then_mul: u64,
+    then_add: u64,
+    else_mul: u64,
+    else_add: u64,
+    mask: u64,
+    consumed: usize,
+}
+
+/// Select an affine transition after the target-neutral optimizer has proved
+/// an if/else diamond equivalent to a scalar boolean-mask selection.  This is
+/// deliberately a local IR pattern: constants, slots, comparison kind and
+/// integer mask all come from the program being compiled.
+fn runtime_affine_select_fusion_candidate(
+    program: &RuntimeProgram,
+    idx: usize,
+    has_incoming_target: &[bool],
+) -> Option<RuntimeAffineSelectFusion> {
+    if idx + 7 >= program.instrs.len()
+        || (1..=7).any(|offset| {
+            has_incoming_target
+                .get(idx + offset)
+                .copied()
+                .unwrap_or(false)
+        })
+    {
+        return None;
+    }
+    let (cond_slot, cmp_op, cmp_lhs, cmp_rhs) = match &program.instrs[idx] {
+        RuntimeInstr::Cmp { dst, op, lhs, rhs } => (*dst, *op, *lhs, *rhs),
+        _ => return None,
+    };
+    let mask_slot = match &program.instrs[idx + 1] {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::Sub,
+            lhs: RuntimeOperand::Imm(0),
+            rhs: RuntimeOperand::Slot(cond),
+        } if *cond == cond_slot => *dst,
+        _ => return None,
+    };
+    let (coefficient_slot, mul_delta) = match &program.instrs[idx + 2] {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(mask),
+            rhs: RuntimeOperand::Imm(delta),
+        } if *mask == mask_slot => (*dst, *delta),
+        _ => return None,
+    };
+    let else_mul = match &program.instrs[idx + 3] {
+        RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::BitXor,
+            rhs: RuntimeOperand::Imm(value),
+        } if *dst == coefficient_slot => *value,
+        _ => return None,
+    };
+    let state_slot = match &program.instrs[idx + 4] {
+        RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::Mul,
+            rhs: RuntimeOperand::Slot(coefficient),
+        } if *coefficient == coefficient_slot => *dst,
+        _ => return None,
+    };
+    let add_delta = match &program.instrs[idx + 5] {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(mask),
+            rhs: RuntimeOperand::Imm(delta),
+        } if *dst == coefficient_slot && *mask == mask_slot => *delta,
+        _ => return None,
+    };
+    let else_add = match &program.instrs[idx + 6] {
+        RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::BitXor,
+            rhs: RuntimeOperand::Imm(value),
+        } if *dst == coefficient_slot => *value,
+        _ => return None,
+    };
+    match &program.instrs[idx + 7] {
+        RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::Add,
+            rhs: RuntimeOperand::Slot(coefficient),
+        } if *dst == state_slot && *coefficient == coefficient_slot => {}
+        _ => return None,
+    }
+    let mask = match program.instrs.get(idx + 8) {
+        Some(RuntimeInstr::BinOpInPlace {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            rhs: RuntimeOperand::Imm(mask),
+        }) if *dst == state_slot && !has_incoming_target.get(idx + 8).copied().unwrap_or(false) => {
+            *mask
+        }
+        _ => u64::MAX,
+    };
+    let consumed = if mask == u64::MAX { 8 } else { 9 };
+    if runtime_slot_read_before_write(program, idx + consumed, cond_slot)
+        || runtime_slot_read_before_write(program, idx + consumed, mask_slot)
+        || runtime_slot_read_before_write(program, idx + consumed, coefficient_slot)
+    {
+        return None;
+    }
+    Some(RuntimeAffineSelectFusion {
+        cmp_op,
+        cmp_lhs,
+        cmp_rhs,
+        state_slot,
+        then_mul: else_mul ^ mul_delta,
+        then_add: else_add ^ add_delta,
+        else_mul,
+        else_add,
+        mask,
+        consumed,
+    })
 }
 
 fn runtime_u32_affine_fusion_candidate(
@@ -1425,33 +1962,6 @@ fn runtime_instr_reads_slot(instr: &RuntimeInstr, slot: usize) -> bool {
                 || runtime_operand_reads_slot(index, slot)
                 || runtime_operand_reads_slot(src, slot)
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            filter_slots.contains(&slot) || runtime_operand_reads_slot(hash, slot)
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            filter_slots, hash, ..
-        }
-        | RuntimeInstr::BloomClassic4Check {
-            filter_slots, hash, ..
-        } => filter_slots.contains(&slot) || runtime_operand_reads_slot(hash, slot),
-        RuntimeInstr::HashCtrlGroupProbe {
-            ctrl_slots,
-            group_start,
-            fingerprint,
-            ..
-        } => {
-            ctrl_slots.contains(&slot)
-                || runtime_operand_reads_slot(group_start, slot)
-                || runtime_operand_reads_slot(fingerprint, slot)
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            build_rows,
-            probe_rows,
-            ..
-        } => {
-            runtime_operand_reads_slot(build_rows, slot)
-                || runtime_operand_reads_slot(probe_rows, slot)
-        }
         RuntimeInstr::Alloc { size, .. } => runtime_operand_reads_slot(size, slot),
         RuntimeInstr::Free { ptr, size } => {
             runtime_operand_reads_slot(ptr, slot) || runtime_operand_reads_slot(size, slot)
@@ -1500,13 +2010,6 @@ fn runtime_instr_writes_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         RuntimeInstr::HeapLoadInt { dst, .. } => *dst == slot,
         RuntimeInstr::StoreIndex { base_slots, .. } => base_slots.contains(&slot),
         RuntimeInstr::StoreIndexUnchecked { base_slots, .. } => base_slots.contains(&slot),
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. } => filter_slots.contains(&slot),
-        RuntimeInstr::BloomSplitBlockCheck { dst, .. } => *dst == slot,
-        RuntimeInstr::BloomClassic4Check {
-            dst, lanes_checked, ..
-        } => *dst == slot || *lanes_checked == slot,
-        RuntimeInstr::HashCtrlGroupProbe { dst_mask, .. } => *dst_mask == slot,
-        RuntimeInstr::JoinSelectAdaptive { dst, .. } => *dst == slot,
         RuntimeInstr::Alloc { dst, .. }
         | RuntimeInstr::FileOpen { dst, .. }
         | RuntimeInstr::FileWrite { dst, .. }
@@ -1683,58 +2186,6 @@ fn bump_instr_uses(counts: &mut [u32], instr: &RuntimeInstr, weight: u32) {
             bump_operand_use_weight(counts, dst_ptr, weight);
             bump_operand_use_weight(counts, src_ptr, weight);
             bump_operand_use_weight(counts, bytes, weight);
-        }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            bump_operand_use_weight(counts, hash, weight);
-            for slot in filter_slots {
-                bump_slot_use_weight(counts, *slot, weight / 2);
-            }
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst,
-            filter_slots,
-            hash,
-        } => {
-            bump_slot_use_weight(counts, *dst, weight);
-            bump_operand_use_weight(counts, hash, weight);
-            for slot in filter_slots {
-                bump_slot_use_weight(counts, *slot, weight / 2);
-            }
-        }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => {
-            bump_slot_use_weight(counts, *dst, weight);
-            bump_slot_use_weight(counts, *lanes_checked, weight);
-            bump_operand_use_weight(counts, hash, weight);
-            for slot in filter_slots {
-                bump_slot_use_weight(counts, *slot, weight / 2);
-            }
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            group_start,
-            fingerprint,
-        } => {
-            bump_slot_use_weight(counts, *dst_mask, weight);
-            bump_operand_use_weight(counts, group_start, weight);
-            bump_operand_use_weight(counts, fingerprint, weight);
-            for slot in ctrl_slots {
-                bump_slot_use_weight(counts, *slot, weight / 2);
-            }
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            dst,
-            build_rows,
-            probe_rows,
-        } => {
-            bump_slot_use_weight(counts, *dst, weight);
-            bump_operand_use_weight(counts, build_rows, weight);
-            bump_operand_use_weight(counts, probe_rows, weight);
         }
         RuntimeInstr::Alloc { dst, size } => {
             bump_slot_use_weight(counts, *dst, weight);

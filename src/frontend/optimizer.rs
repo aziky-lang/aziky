@@ -4,12 +4,12 @@ use crate::frontend::semantics::{
 };
 use std::collections::{HashMap, VecDeque};
 
-fn lcg_lookahead_optimize_runtime_generic(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+fn affine_lookahead_optimize_runtime_generic(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
     stmts
         .into_iter()
         .map(|stmt| match stmt {
             LoweredStmt::RuntimeGeneric { mut program } => {
-                optimize_lcg_lookahead(&mut program.instrs);
+                optimize_affine_lookahead(&mut program);
                 LoweredStmt::RuntimeGeneric { program }
             }
             other => other,
@@ -20,20 +20,522 @@ fn lcg_lookahead_optimize_runtime_generic(stmts: Vec<LoweredStmt>) -> Vec<Lowere
 pub fn optimize_semantics_ir(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
     let stmts = hoist_loop_invariants(stmts);
     let stmts = const_fold(stmts);
-    let stmts = fold_runtime_kernels(stmts);
+    let stmts = finish_runtime_lowering(stmts);
     let stmts = inline_runtime_generic_leaf_calls(stmts);
     let stmts = tail_call_optimization(stmts);
     let stmts = simplify_runtime_generic_control_flow(stmts);
     let stmts = copy_propagate_runtime_generic(stmts);
     let stmts = specialize_runtime_generic_invariant_constants(stmts);
     let stmts = simplify_runtime_generic_control_flow(stmts);
+    let stmts = if_convert_affine_diamonds(stmts);
+    let stmts = collapse_pure_affine_counted_loops(stmts);
     let stmts = eliminate_runtime_loop_bounds_checks(stmts);
     let stmts = unroll_runtime_small_counted_loops(stmts);
-    let stmts = lcg_lookahead_optimize_runtime_generic(stmts);
+    let stmts = partial_unroll_runtime_counted_loops(stmts);
+    let stmts = affine_lookahead_optimize_runtime_generic(stmts);
+    let stmts = peephole_optimize_runtime_generic(stmts);
+    let stmts = eliminate_overwritten_runtime_moves(stmts);
+    let stmts = select_fixed_adjacent_sort_loops(stmts);
+    let stmts = reduce_dead_prefix_outputs(stmts);
     let stmts = peephole_optimize_runtime_generic(stmts);
     let stmts = eliminate_overwritten_runtime_moves(stmts);
     let stmts = compact_runtime_generic_slots(stmts);
     dead_print_elimination(stmts)
+}
+
+fn select_fixed_adjacent_sort_loops(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { mut program } => {
+                while select_one_fixed_adjacent_sort_loop(&mut program.instrs) {}
+                LoweredStmt::RuntimeGeneric { program }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Recognize the canonical semantics of a complete adjacent-swap sort over a
+/// proven fixed array. The selected instruction remains target-neutral; each
+/// backend may choose a scalar loop, compare/swap network, or radix lowering.
+fn select_one_fixed_adjacent_sort_loop(instrs: &mut Vec<RuntimeInstr>) -> bool {
+    for index in 1..instrs.len().saturating_sub(1) {
+        let RuntimeInstr::Mov {
+            dst,
+            src: RuntimeOperand::Slot(source),
+        } = instrs[index]
+        else {
+            continue;
+        };
+        if matches!(instrs[index - 1], RuntimeInstr::LoadIndexUnchecked { dst: loaded, .. } if loaded == source)
+            && matches!(
+                instrs[index + 1],
+                RuntimeInstr::BinOp {
+                    op: RuntimeBinOp::Add,
+                    ..
+                }
+            )
+            && !instrs
+                .iter()
+                .enumerate()
+                .any(|(other, instr)| other != index && runtime_instr_reads_slot(instr, dst))
+        {
+            replace_runtime_instr_range(instrs, index, index + 1, Vec::new());
+            return true;
+        }
+    }
+    for start in 0..instrs.len().saturating_sub(19) {
+        let RuntimeInstr::Mov {
+            dst: pass,
+            src: RuntimeOperand::Imm(0),
+        } = instrs[start]
+        else {
+            continue;
+        };
+        let (len, end) = match instrs.get(start + 1) {
+            Some(RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(slot),
+                rhs: RuntimeOperand::Imm(len),
+                target,
+            }) if *slot == pass && *len >= 2 => (*len as usize, *target),
+            _ => continue,
+        };
+        if end != start + 20 || end > instrs.len() {
+            continue;
+        }
+        let RuntimeInstr::Mov {
+            dst: index,
+            src: RuntimeOperand::Imm(0),
+        } = instrs[start + 2]
+        else {
+            continue;
+        };
+        let (next_slot, bound_slot) = match (&instrs[start + 3], &instrs[start + 4]) {
+            (
+                RuntimeInstr::BinOp {
+                    dst: next,
+                    op: RuntimeBinOp::Add,
+                    lhs: RuntimeOperand::Slot(slot),
+                    rhs: RuntimeOperand::Imm(1),
+                },
+                RuntimeInstr::BinOp {
+                    dst: bound,
+                    op: RuntimeBinOp::Sub,
+                    lhs: RuntimeOperand::Imm(bound_len),
+                    rhs: RuntimeOperand::Slot(bound_pass),
+                },
+            ) if *slot == index && *bound_len as usize == len && *bound_pass == pass => {
+                (*next, *bound)
+            }
+            _ => continue,
+        };
+        match &instrs[start + 5] {
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(lhs),
+                rhs: RuntimeOperand::Slot(rhs),
+                target,
+            } if *lhs == next_slot && *rhs == bound_slot && *target == start + 18 => {}
+            _ => continue,
+        }
+        let (left_value, base_slots) = match &instrs[start + 6] {
+            RuntimeInstr::LoadIndexUnchecked {
+                dst,
+                base_slots,
+                index: RuntimeOperand::Slot(slot),
+            } if *slot == index && base_slots.len() == len => (*dst, base_slots.clone()),
+            _ => continue,
+        };
+        let right_index = match &instrs[start + 7] {
+            RuntimeInstr::BinOp {
+                dst,
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(slot),
+                rhs: RuntimeOperand::Imm(1),
+            } if *slot == index => *dst,
+            _ => continue,
+        };
+        let right_value = match &instrs[start + 8] {
+            RuntimeInstr::LoadIndexUnchecked {
+                dst,
+                base_slots: right_base,
+                index: RuntimeOperand::Slot(slot),
+            } if *slot == right_index && *right_base == base_slots => *dst,
+            _ => continue,
+        };
+        let signed = match &instrs[start + 9] {
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::GtUnsigned,
+                lhs: RuntimeOperand::Slot(lhs),
+                rhs: RuntimeOperand::Slot(rhs),
+                target,
+            } if *lhs == left_value && *rhs == right_value && *target == start + 16 => false,
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::GtSigned,
+                lhs: RuntimeOperand::Slot(lhs),
+                rhs: RuntimeOperand::Slot(rhs),
+                target,
+            } if *lhs == left_value && *rhs == right_value && *target == start + 16 => true,
+            _ => continue,
+        };
+        let (swap_left, swap_right) = match (&instrs[start + 10], &instrs[start + 12]) {
+            (
+                RuntimeInstr::LoadIndexUnchecked {
+                    dst: left,
+                    base_slots: left_base,
+                    index: RuntimeOperand::Slot(left_index),
+                },
+                RuntimeInstr::LoadIndexUnchecked {
+                    dst: right,
+                    base_slots: right_base,
+                    index: RuntimeOperand::Slot(right_index),
+                },
+            ) if *left_index == index && *left_base == base_slots && *right_base == base_slots => {
+                (*left, (*right, *right_index))
+            }
+            _ => continue,
+        };
+        let final_right_index = match (&instrs[start + 11], &instrs[start + 14]) {
+            (
+                RuntimeInstr::BinOp {
+                    dst: first,
+                    op: RuntimeBinOp::Add,
+                    lhs: RuntimeOperand::Slot(first_index),
+                    rhs: RuntimeOperand::Imm(1),
+                },
+                RuntimeInstr::BinOp {
+                    dst: second,
+                    op: RuntimeBinOp::Add,
+                    lhs: RuntimeOperand::Slot(second_index),
+                    rhs: RuntimeOperand::Imm(1),
+                },
+            ) if *first_index == index && *second_index == index && *first == swap_right.1 => {
+                *second
+            }
+            _ => continue,
+        };
+        match (&instrs[start + 13], &instrs[start + 15]) {
+            (
+                RuntimeInstr::StoreIndexUnchecked {
+                    base_slots: left_base,
+                    index: RuntimeOperand::Slot(left_index),
+                    src: RuntimeOperand::Slot(source_right),
+                },
+                RuntimeInstr::StoreIndexUnchecked {
+                    base_slots: right_base,
+                    index: RuntimeOperand::Slot(stored_right_index),
+                    src: RuntimeOperand::Slot(source_left),
+                },
+            ) if *left_base == base_slots
+                && *right_base == base_slots
+                && *left_index == index
+                && *source_right == swap_right.0
+                && *stored_right_index == final_right_index
+                && *source_left == swap_left => {}
+            _ => continue,
+        }
+        match (
+            &instrs[start + 16],
+            &instrs[start + 17],
+            &instrs[start + 18],
+            &instrs[start + 19],
+        ) {
+            (
+                RuntimeInstr::BinOpInPlace {
+                    dst: inner,
+                    op: RuntimeBinOp::Add,
+                    rhs: RuntimeOperand::Imm(1),
+                },
+                RuntimeInstr::Jump {
+                    target: inner_header,
+                },
+                RuntimeInstr::BinOpInPlace {
+                    dst: outer,
+                    op: RuntimeBinOp::Add,
+                    rhs: RuntimeOperand::Imm(1),
+                },
+                RuntimeInstr::Jump {
+                    target: outer_header,
+                },
+            ) if *inner == index
+                && *inner_header == start + 3
+                && *outer == pass
+                && *outer_header == start + 1 => {}
+            _ => continue,
+        }
+        if has_external_runtime_entry(instrs, start, end) {
+            continue;
+        }
+        replace_runtime_instr_range(
+            instrs,
+            start,
+            end,
+            vec![RuntimeInstr::RadixSortFixedInt {
+                slots: base_slots,
+                bits: 64,
+                signed,
+                stable: true,
+            }],
+        );
+        return true;
+    }
+    false
+}
+
+fn reduce_dead_prefix_outputs(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { mut program } => {
+                while reduce_one_dead_prefix_output(&mut program.instrs) {}
+                LoweredStmt::RuntimeGeneric { program }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Turn a scalarized inclusive prefix chain into a balanced reduction only
+/// when CFG liveness proves that solely the final prefix value is observable.
+/// Wrapping addition is associative, so overflow has identical semantics.
+fn reduce_one_dead_prefix_output(instrs: &mut Vec<RuntimeInstr>) -> bool {
+    for start in 0..instrs.len() {
+        let mut cursor = start;
+        let mut slots = Vec::<usize>::new();
+        let mut temporaries = Vec::<usize>::new();
+        while cursor + 3 < instrs.len() {
+            let (current, previous, temp_a, temp_b, temp_sum) = match (
+                &instrs[cursor],
+                &instrs[cursor + 1],
+                &instrs[cursor + 2],
+                &instrs[cursor + 3],
+            ) {
+                (
+                    RuntimeInstr::Mov {
+                        dst: temp_a,
+                        src: RuntimeOperand::Slot(current),
+                    },
+                    RuntimeInstr::Mov {
+                        dst: temp_b,
+                        src: RuntimeOperand::Slot(previous),
+                    },
+                    RuntimeInstr::BinOp {
+                        dst: temp_sum,
+                        op: RuntimeBinOp::Add,
+                        lhs: RuntimeOperand::Slot(lhs),
+                        rhs: RuntimeOperand::Slot(rhs),
+                    },
+                    RuntimeInstr::Mov {
+                        dst,
+                        src: RuntimeOperand::Slot(sum),
+                    },
+                ) if *dst == *current
+                    && *sum == *temp_sum
+                    && ((*lhs == *temp_a && *rhs == *temp_b)
+                        || (*lhs == *temp_b && *rhs == *temp_a)) =>
+                {
+                    (*current, *previous, *temp_a, *temp_b, *temp_sum)
+                }
+                _ => break,
+            };
+            if slots.is_empty() {
+                if current == previous {
+                    break;
+                }
+                slots.push(previous);
+            } else if slots.last().copied() != Some(previous) || slots.contains(&current) {
+                break;
+            }
+            slots.push(current);
+            for temporary in [temp_a, temp_b, temp_sum] {
+                if !temporaries.contains(&temporary) {
+                    temporaries.push(temporary);
+                }
+            }
+            cursor += 4;
+        }
+        if slots.len() < 4 || slots.len() > 64 {
+            continue;
+        }
+        if has_external_runtime_entry(instrs, start, cursor)
+            || temporaries
+                .iter()
+                .any(|slot| runtime_slot_read_before_write_from(instrs, cursor, *slot))
+            || slots[..slots.len() - 1]
+                .iter()
+                .any(|slot| runtime_slot_read_before_write_from(instrs, cursor, *slot))
+            || !runtime_slot_read_before_write_from(
+                instrs,
+                cursor,
+                *slots.last().expect("non-empty prefix slots"),
+            )
+        {
+            continue;
+        }
+
+        if let Some((producer_start, replacement)) =
+            schedule_streaming_reduction(instrs, start, cursor, &slots)
+        {
+            replace_runtime_instr_range(instrs, producer_start, cursor, replacement);
+            return true;
+        }
+
+        let mut active = slots;
+        let mut replacement = Vec::new();
+        while active.len() > 1 {
+            let mut next = Vec::with_capacity(active.len().div_ceil(2));
+            let mut pairs = active.chunks_exact(2);
+            for pair in &mut pairs {
+                replacement.push(RuntimeInstr::BinOp {
+                    dst: pair[1],
+                    op: RuntimeBinOp::Add,
+                    lhs: RuntimeOperand::Slot(pair[0]),
+                    rhs: RuntimeOperand::Slot(pair[1]),
+                });
+                next.push(pair[1]);
+            }
+            if let [tail] = pairs.remainder() {
+                next.push(*tail);
+            }
+            active = next;
+        }
+        replace_runtime_instr_range(instrs, start, cursor, replacement);
+        return true;
+    }
+    false
+}
+
+/// Interleave an associative reduction with its already-ordered producers.
+///
+/// This is a pressure-aware scheduling rule, not an algorithm recognizer. It
+/// applies to arbitrary slots and producer expressions when every input is
+/// defined once before the reduction, no input is observed in between, and no
+/// control edge can enter the rewritten region. Keeping one running scalar
+/// avoids making the complete reduction set live at the same time.
+fn schedule_streaming_reduction(
+    instrs: &[RuntimeInstr],
+    reduction_start: usize,
+    reduction_end: usize,
+    slots: &[usize],
+) -> Option<(usize, Vec<RuntimeInstr>)> {
+    let (&accumulator, &output) = (slots.first()?, slots.last()?);
+    let definitions = slots
+        .iter()
+        .map(|slot| {
+            (0..reduction_start)
+                .rev()
+                .find(|index| runtime_instr_writes_slot(&instrs[*index], *slot))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if definitions.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return None;
+    }
+    let producer_start = definitions[0];
+    if has_external_runtime_entry(instrs, producer_start, reduction_end) {
+        return None;
+    }
+    if instrs[producer_start..reduction_start]
+        .iter()
+        .enumerate()
+        .any(|(offset, instr)| {
+            matches!(
+                instr,
+                RuntimeInstr::Jump { target } if *target != producer_start + offset + 1
+            ) || matches!(
+                instr,
+                RuntimeInstr::JumpIfZero { .. }
+                    | RuntimeInstr::JumpIfCmpFalse { .. }
+                    | RuntimeInstr::Call { .. }
+                    | RuntimeInstr::Return
+                    | RuntimeInstr::Exit { .. }
+                    | RuntimeInstr::ThreadSpawn { .. }
+            )
+        })
+    {
+        return None;
+    }
+    for (&slot, &definition) in slots.iter().zip(&definitions) {
+        if instrs[definition + 1..reduction_start]
+            .iter()
+            .any(|instr| runtime_instr_reads_slot(instr, slot))
+        {
+            return None;
+        }
+    }
+
+    let mut definition_to_slot = std::collections::HashMap::new();
+    for (&slot, &definition) in slots.iter().zip(&definitions).skip(1) {
+        definition_to_slot.insert(definition, slot);
+    }
+    let mut replacement = Vec::with_capacity(reduction_start - producer_start + slots.len());
+    for (index, instr) in instrs
+        .iter()
+        .enumerate()
+        .take(reduction_start)
+        .skip(producer_start)
+    {
+        if matches!(instr, RuntimeInstr::Jump { target } if *target == index + 1) {
+            continue;
+        }
+        replacement.push(instr.clone());
+        if let Some(&slot) = definition_to_slot.get(&index) {
+            replacement.push(RuntimeInstr::BinOpInPlace {
+                dst: accumulator,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Slot(slot),
+            });
+        }
+    }
+    replacement.push(RuntimeInstr::Mov {
+        dst: output,
+        src: RuntimeOperand::Slot(accumulator),
+    });
+    Some((producer_start, replacement))
+}
+
+fn has_external_runtime_entry(instrs: &[RuntimeInstr], start: usize, end: usize) -> bool {
+    instrs.iter().enumerate().any(|(index, instr)| {
+        let target = match instr {
+            RuntimeInstr::Jump { target }
+            | RuntimeInstr::JumpIfZero { target, .. }
+            | RuntimeInstr::JumpIfCmpFalse { target, .. }
+            | RuntimeInstr::Call { target }
+            | RuntimeInstr::ThreadSpawn { target, .. } => *target,
+            _ => return false,
+        };
+        target > start && target < end && !(start..end).contains(&index)
+    })
+}
+
+fn runtime_slot_read_before_write_from(instrs: &[RuntimeInstr], start: usize, slot: usize) -> bool {
+    let mut pending = vec![start];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(index) = pending.pop() {
+        if index >= instrs.len() || !visited.insert(index) {
+            continue;
+        }
+        let instr = &instrs[index];
+        if runtime_instr_reads_slot(instr, slot) {
+            return true;
+        }
+        if runtime_instr_writes_slot(instr, slot) {
+            continue;
+        }
+        match instr {
+            RuntimeInstr::Jump { target } => pending.push(*target),
+            RuntimeInstr::JumpIfZero { target, .. }
+            | RuntimeInstr::JumpIfCmpFalse { target, .. } => {
+                pending.push(*target);
+                pending.push(index + 1);
+            }
+            RuntimeInstr::Call { .. } | RuntimeInstr::ThreadSpawn { .. } => return true,
+            RuntimeInstr::Return | RuntimeInstr::Exit { .. } => {}
+            _ => pending.push(index + 1),
+        }
+    }
+    false
 }
 
 fn eliminate_overwritten_runtime_moves(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
@@ -177,11 +679,6 @@ fn peephole_optimize_runtime_instrs(slots: usize, instrs: &[RuntimeInstr]) -> Ve
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::LoadSeed { .. }
             | RuntimeInstr::Mov { .. }
             | RuntimeInstr::BinOp { .. }
@@ -404,95 +901,6 @@ fn fold_runtime_instr(
                 base_slots: base_slots.clone(),
                 index,
                 src,
-            })
-        }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            let hash = fold_operand_const(hash, const_slots);
-            for &slot in filter_slots {
-                const_slots[slot] = None;
-            }
-            Some(RuntimeInstr::BloomSplitBlockInsert {
-                filter_slots: filter_slots.clone(),
-                hash,
-            })
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst,
-            filter_slots,
-            hash,
-        } => {
-            let hash = fold_operand_const(hash, const_slots);
-            for &slot in filter_slots {
-                const_slots[slot] = None;
-            }
-            const_slots[*dst] = None;
-            Some(RuntimeInstr::BloomSplitBlockCheck {
-                dst: *dst,
-                filter_slots: filter_slots.clone(),
-                hash,
-            })
-        }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => {
-            let hash = fold_operand_const(hash, const_slots);
-            for &slot in filter_slots {
-                const_slots[slot] = None;
-            }
-            const_slots[*dst] = None;
-            const_slots[*lanes_checked] = None;
-            Some(RuntimeInstr::BloomClassic4Check {
-                dst: *dst,
-                lanes_checked: *lanes_checked,
-                filter_slots: filter_slots.clone(),
-                hash,
-            })
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            group_start,
-            fingerprint,
-        } => {
-            let group_start = fold_operand_const(group_start, const_slots);
-            let fingerprint = fold_operand_const(fingerprint, const_slots);
-            for &slot in ctrl_slots {
-                const_slots[slot] = None;
-            }
-            const_slots[*dst_mask] = None;
-            Some(RuntimeInstr::HashCtrlGroupProbe {
-                dst_mask: *dst_mask,
-                ctrl_slots: ctrl_slots.clone(),
-                group_start,
-                fingerprint,
-            })
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            dst,
-            build_rows,
-            probe_rows,
-        } => {
-            let build_rows = fold_operand_const(build_rows, const_slots);
-            let probe_rows = fold_operand_const(probe_rows, const_slots);
-            if let (Some(build), Some(probe)) = (
-                operand_const_value(&build_rows, const_slots),
-                operand_const_value(&probe_rows, const_slots),
-            ) {
-                let selected = u64::from(build >= 128 && probe >= 200_000);
-                const_slots[*dst] = Some(selected);
-                return Some(RuntimeInstr::Mov {
-                    dst: *dst,
-                    src: RuntimeOperand::Imm(selected),
-                });
-            }
-            const_slots[*dst] = None;
-            Some(RuntimeInstr::JoinSelectAdaptive {
-                dst: *dst,
-                build_rows,
-                probe_rows,
             })
         }
         RuntimeInstr::HeapLoadInt {
@@ -1384,66 +1792,6 @@ fn copy_propagate_runtime_instrs(slots: usize, instrs: &[RuntimeInstr]) -> Vec<R
                     src,
                 });
             }
-            RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-                clear_aliases(&mut alias);
-                out.push(RuntimeInstr::BloomSplitBlockInsert {
-                    filter_slots: filter_slots.clone(),
-                    hash: rewrite_operand(hash, &alias),
-                });
-            }
-            RuntimeInstr::BloomSplitBlockCheck {
-                dst,
-                filter_slots,
-                hash,
-            } => {
-                invalidate_slot(*dst, &mut alias);
-                out.push(RuntimeInstr::BloomSplitBlockCheck {
-                    dst: *dst,
-                    filter_slots: filter_slots.clone(),
-                    hash: rewrite_operand(hash, &alias),
-                });
-            }
-            RuntimeInstr::BloomClassic4Check {
-                dst,
-                lanes_checked,
-                filter_slots,
-                hash,
-            } => {
-                invalidate_slot(*dst, &mut alias);
-                invalidate_slot(*lanes_checked, &mut alias);
-                out.push(RuntimeInstr::BloomClassic4Check {
-                    dst: *dst,
-                    lanes_checked: *lanes_checked,
-                    filter_slots: filter_slots.clone(),
-                    hash: rewrite_operand(hash, &alias),
-                });
-            }
-            RuntimeInstr::HashCtrlGroupProbe {
-                dst_mask,
-                ctrl_slots,
-                group_start,
-                fingerprint,
-            } => {
-                invalidate_slot(*dst_mask, &mut alias);
-                out.push(RuntimeInstr::HashCtrlGroupProbe {
-                    dst_mask: *dst_mask,
-                    ctrl_slots: ctrl_slots.clone(),
-                    group_start: rewrite_operand(group_start, &alias),
-                    fingerprint: rewrite_operand(fingerprint, &alias),
-                });
-            }
-            RuntimeInstr::JoinSelectAdaptive {
-                dst,
-                build_rows,
-                probe_rows,
-            } => {
-                invalidate_slot(*dst, &mut alias);
-                out.push(RuntimeInstr::JoinSelectAdaptive {
-                    dst: *dst,
-                    build_rows: rewrite_operand(build_rows, &alias),
-                    probe_rows: rewrite_operand(probe_rows, &alias),
-                });
-            }
             RuntimeInstr::StoreIndexUnchecked {
                 base_slots,
                 index,
@@ -1693,6 +2041,573 @@ struct CountedLoopInfo {
     update_idx: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PureAffineLoopStep {
+    state_slot: usize,
+    mul: u64,
+    index_mul: u64,
+    add: u64,
+    mask: u64,
+}
+
+/// Collapses a side-effect-free, constant-trip affine recurrence to its exact
+/// composed transition. This is a local loop transform: it depends only on the
+/// loop CFG and scalar data flow, and is independent of source names, files,
+/// statement placement, and particular constants.
+fn collapse_pure_affine_counted_loops(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { mut program } => {
+                while collapse_one_pure_affine_counted_loop(&mut program.instrs) {}
+                LoweredStmt::RuntimeGeneric { program }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+fn if_convert_affine_diamonds(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { mut program } => {
+                while if_convert_one_affine_diamond(&mut program) {}
+                LoweredStmt::RuntimeGeneric { program }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+fn if_convert_one_affine_diamond(program: &mut RuntimeProgram) -> bool {
+    for branch in 0..program.instrs.len() {
+        let (cmp_op, cmp_lhs, cmp_rhs, else_start) = match &program.instrs[branch] {
+            RuntimeInstr::JumpIfCmpFalse {
+                op,
+                lhs,
+                rhs,
+                target,
+            } if *target > branch + 1 && *target < program.instrs.len() => {
+                (*op, *lhs, *rhs, *target)
+            }
+            _ => continue,
+        };
+        let RuntimeInstr::Jump { target: join } = program.instrs[else_start - 1] else {
+            continue;
+        };
+        if join <= else_start || join > program.instrs.len() {
+            continue;
+        }
+        let Some(then_step) =
+            match_pure_affine_loop_step(&program.instrs[branch + 1..else_start - 1], usize::MAX)
+        else {
+            continue;
+        };
+        let Some(else_step) =
+            match_pure_affine_loop_step(&program.instrs[else_start..join], usize::MAX)
+        else {
+            continue;
+        };
+        if then_step.state_slot != else_step.state_slot
+            || then_step.index_mul != 0
+            || else_step.index_mul != 0
+            || then_step.mask != else_step.mask
+            || !runtime_operand_reads_slot(&cmp_lhs, then_step.state_slot)
+        {
+            continue;
+        }
+        let has_external_entry = program.instrs.iter().enumerate().any(|(idx, instr)| {
+            let target = match instr {
+                RuntimeInstr::Jump { target }
+                | RuntimeInstr::JumpIfZero { target, .. }
+                | RuntimeInstr::JumpIfCmpFalse { target, .. }
+                | RuntimeInstr::Call { target }
+                | RuntimeInstr::ThreadSpawn { target, .. } => *target,
+                _ => return false,
+            };
+            target > branch && target < join && !(branch..join).contains(&idx)
+        });
+        if has_external_entry {
+            continue;
+        }
+
+        let cond_slot = program.slots;
+        let mask_slot = cond_slot + 1;
+        let coefficient_slot = cond_slot + 2;
+        program.slots += 3;
+        let state_slot = then_step.state_slot;
+        let mut replacement = vec![
+            RuntimeInstr::Cmp {
+                dst: cond_slot,
+                op: cmp_op,
+                lhs: cmp_lhs,
+                rhs: cmp_rhs,
+            },
+            RuntimeInstr::BinOp {
+                dst: mask_slot,
+                op: RuntimeBinOp::Sub,
+                lhs: RuntimeOperand::Imm(0),
+                rhs: RuntimeOperand::Slot(cond_slot),
+            },
+            RuntimeInstr::BinOp {
+                dst: coefficient_slot,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(mask_slot),
+                rhs: RuntimeOperand::Imm(then_step.mul ^ else_step.mul),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: coefficient_slot,
+                op: RuntimeBinOp::BitXor,
+                rhs: RuntimeOperand::Imm(else_step.mul),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: state_slot,
+                op: RuntimeBinOp::Mul,
+                rhs: RuntimeOperand::Slot(coefficient_slot),
+            },
+            RuntimeInstr::BinOp {
+                dst: coefficient_slot,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(mask_slot),
+                rhs: RuntimeOperand::Imm(then_step.add ^ else_step.add),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: coefficient_slot,
+                op: RuntimeBinOp::BitXor,
+                rhs: RuntimeOperand::Imm(else_step.add),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: state_slot,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Slot(coefficient_slot),
+            },
+        ];
+        if then_step.mask != u64::MAX {
+            replacement.push(RuntimeInstr::BinOpInPlace {
+                dst: state_slot,
+                op: RuntimeBinOp::BitAnd,
+                rhs: RuntimeOperand::Imm(then_step.mask),
+            });
+        }
+        replace_runtime_instr_range(&mut program.instrs, branch, join, replacement);
+        return true;
+    }
+    false
+}
+
+fn collapse_one_pure_affine_counted_loop(instrs: &mut Vec<RuntimeInstr>) -> bool {
+    for info in find_canonical_counted_loops(instrs) {
+        let LoopLimit::Imm(limit) = info.limit else {
+            continue;
+        };
+        let Some(trip_count) = limit.checked_sub(info.start) else {
+            continue;
+        };
+        if info.header + 1 > info.update_idx || info.update_idx > info.latch {
+            continue;
+        }
+        if loop_has_external_body_entry(instrs, info) {
+            continue;
+        }
+        let body = &instrs[info.header + 1..info.update_idx];
+        let Some(step) = match_pure_affine_loop_step(body, info.ind_slot) else {
+            continue;
+        };
+
+        let mut temporary_slots = Vec::new();
+        for instr in body {
+            for slot in runtime_instr_written_slots(instr) {
+                if slot != step.state_slot && !temporary_slots.contains(&slot) {
+                    temporary_slots.push(slot);
+                }
+            }
+        }
+        if temporary_slots.iter().any(|slot| {
+            instrs[info.exit_target.min(instrs.len())..]
+                .iter()
+                .any(|instr| runtime_instr_reads_slot(instr, *slot))
+        }) {
+            continue;
+        }
+
+        let (composed_mul, composed_index_mul, composed_add) =
+            affine_index_pow_masked(step.mul, step.index_mul, step.add, trip_count, step.mask);
+        let mut replacement = Vec::with_capacity(8);
+        if trip_count != 0 {
+            if composed_mul == 0 && composed_index_mul == 0 {
+                replacement.push(RuntimeInstr::Mov {
+                    dst: step.state_slot,
+                    src: RuntimeOperand::Imm(composed_add),
+                });
+            } else {
+                if composed_mul == 0 {
+                    replacement.push(RuntimeInstr::Mov {
+                        dst: step.state_slot,
+                        src: RuntimeOperand::Slot(info.ind_slot),
+                    });
+                    if composed_index_mul != 1 {
+                        replacement.push(RuntimeInstr::BinOpInPlace {
+                            dst: step.state_slot,
+                            op: RuntimeBinOp::Mul,
+                            rhs: RuntimeOperand::Imm(composed_index_mul),
+                        });
+                    }
+                } else if composed_mul != 1 {
+                    replacement.push(RuntimeInstr::BinOpInPlace {
+                        dst: step.state_slot,
+                        op: RuntimeBinOp::Mul,
+                        rhs: RuntimeOperand::Imm(composed_mul),
+                    });
+                }
+                if composed_mul != 0 && composed_index_mul != 0 {
+                    if composed_index_mul != 1 {
+                        replacement.push(RuntimeInstr::BinOpInPlace {
+                            dst: info.ind_slot,
+                            op: RuntimeBinOp::Mul,
+                            rhs: RuntimeOperand::Imm(composed_index_mul),
+                        });
+                    }
+                    replacement.push(RuntimeInstr::BinOpInPlace {
+                        dst: step.state_slot,
+                        op: RuntimeBinOp::Add,
+                        rhs: RuntimeOperand::Slot(info.ind_slot),
+                    });
+                }
+                if composed_add != 0 {
+                    replacement.push(RuntimeInstr::BinOpInPlace {
+                        dst: step.state_slot,
+                        op: RuntimeBinOp::Add,
+                        rhs: RuntimeOperand::Imm(composed_add),
+                    });
+                }
+                if step.mask != u64::MAX {
+                    replacement.push(RuntimeInstr::BinOpInPlace {
+                        dst: step.state_slot,
+                        op: RuntimeBinOp::BitAnd,
+                        rhs: RuntimeOperand::Imm(step.mask),
+                    });
+                }
+            }
+        }
+        replacement.push(RuntimeInstr::Mov {
+            dst: info.ind_slot,
+            src: RuntimeOperand::Imm(limit),
+        });
+        replacement.push(RuntimeInstr::Jump {
+            target: info.exit_target,
+        });
+
+        replace_runtime_instr_range(instrs, info.header, info.latch + 1, replacement);
+        return true;
+    }
+    false
+}
+
+fn match_pure_affine_loop_step(
+    body: &[RuntimeInstr],
+    induction_slot: usize,
+) -> Option<PureAffineLoopStep> {
+    if body.is_empty() {
+        return None;
+    }
+    let mut state_slot = None;
+    let mut current_slots = Vec::<usize>::new();
+    let mut mul = 1u64;
+    let mut index_mul = 0u64;
+    let mut add = 0u64;
+    let mut mask = u64::MAX;
+    let mut narrowing_seen = false;
+    let mut needs_final_narrowing = false;
+
+    for instr in body {
+        match instr {
+            RuntimeInstr::Mov {
+                dst,
+                src: RuntimeOperand::Slot(src),
+            } => {
+                if *dst == induction_slot || *src == induction_slot {
+                    return None;
+                }
+                if current_slots.is_empty() {
+                    state_slot = Some(*src);
+                    current_slots.push(*src);
+                }
+                if !current_slots.contains(src) {
+                    return None;
+                }
+                if !current_slots.contains(dst) {
+                    current_slots.push(*dst);
+                }
+            }
+            RuntimeInstr::BinOp {
+                dst,
+                op,
+                lhs: RuntimeOperand::Slot(lhs),
+                rhs,
+            } => {
+                if *dst == induction_slot || *lhs == induction_slot {
+                    return None;
+                }
+                if current_slots.is_empty() {
+                    state_slot = Some(*lhs);
+                    current_slots.push(*lhs);
+                }
+                if !current_slots.contains(lhs)
+                    || !update_affine_coefficients(
+                        *op,
+                        *rhs,
+                        induction_slot,
+                        &mut mul,
+                        &mut index_mul,
+                        &mut add,
+                        &mut mask,
+                        &mut narrowing_seen,
+                        &mut needs_final_narrowing,
+                    )
+                {
+                    return None;
+                }
+                current_slots.clear();
+                current_slots.push(*dst);
+            }
+            RuntimeInstr::BinOpInPlace { dst, op, rhs } => {
+                if *dst == induction_slot {
+                    return None;
+                }
+                if current_slots.is_empty() {
+                    state_slot = Some(*dst);
+                    current_slots.push(*dst);
+                }
+                if !current_slots.contains(dst)
+                    || !update_affine_coefficients(
+                        *op,
+                        *rhs,
+                        induction_slot,
+                        &mut mul,
+                        &mut index_mul,
+                        &mut add,
+                        &mut mask,
+                        &mut narrowing_seen,
+                        &mut needs_final_narrowing,
+                    )
+                {
+                    return None;
+                }
+                current_slots.clear();
+                current_slots.push(*dst);
+            }
+            RuntimeInstr::NormalizeInt {
+                dst,
+                signed: false,
+                bits,
+            } if current_slots.contains(dst) && (1..=64).contains(bits) => {
+                let next_mask = if *bits == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *bits) - 1
+                };
+                if narrowing_seen && next_mask & mask != next_mask {
+                    return None;
+                }
+                mask = next_mask;
+                mul &= mask;
+                index_mul &= mask;
+                add &= mask;
+                narrowing_seen = true;
+                needs_final_narrowing = false;
+                current_slots.clear();
+                current_slots.push(*dst);
+            }
+            _ => return None,
+        }
+    }
+
+    let state_slot = state_slot?;
+    if !current_slots.contains(&state_slot) || needs_final_narrowing {
+        return None;
+    }
+    Some(PureAffineLoopStep {
+        state_slot,
+        mul: mul & mask,
+        index_mul: index_mul & mask,
+        add: add & mask,
+        mask,
+    })
+}
+
+fn update_affine_coefficients(
+    op: RuntimeBinOp,
+    rhs: RuntimeOperand,
+    induction_slot: usize,
+    mul: &mut u64,
+    index_mul: &mut u64,
+    add: &mut u64,
+    mask: &mut u64,
+    narrowing_seen: &mut bool,
+    needs_final_narrowing: &mut bool,
+) -> bool {
+    match (op, rhs) {
+        (RuntimeBinOp::Mul, RuntimeOperand::Imm(rhs)) => {
+            *mul = mul.wrapping_mul(rhs);
+            *index_mul = index_mul.wrapping_mul(rhs);
+            *add = add.wrapping_mul(rhs);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::Add, RuntimeOperand::Imm(rhs)) => {
+            *add = add.wrapping_add(rhs);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::Sub, RuntimeOperand::Imm(rhs)) => {
+            *add = add.wrapping_sub(rhs);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::Add, RuntimeOperand::Slot(slot)) if slot == induction_slot => {
+            *index_mul = index_mul.wrapping_add(1);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::Sub, RuntimeOperand::Slot(slot)) if slot == induction_slot => {
+            *index_mul = index_mul.wrapping_sub(1);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::Shl, RuntimeOperand::Imm(rhs)) => {
+            let factor = 1u64.wrapping_shl((rhs & 63) as u32);
+            *mul = mul.wrapping_mul(factor);
+            *index_mul = index_mul.wrapping_mul(factor);
+            *add = add.wrapping_mul(factor);
+            *needs_final_narrowing = *narrowing_seen;
+        }
+        (RuntimeBinOp::BitAnd, RuntimeOperand::Imm(rhs))
+            if is_low_bits_mask(rhs) && (!*narrowing_seen || rhs & *mask == rhs) =>
+        {
+            *mask = rhs;
+            *mul &= rhs;
+            *index_mul &= rhs;
+            *add &= rhs;
+            *narrowing_seen = true;
+            *needs_final_narrowing = false;
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn is_low_bits_mask(mask: u64) -> bool {
+    mask == u64::MAX || mask & mask.wrapping_add(1) == 0
+}
+
+fn affine_pow_masked(mut mul: u64, mut add: u64, mut exp: u64, mask: u64) -> (u64, u64) {
+    let mut acc_mul = 1u64;
+    let mut acc_add = 0u64;
+    while exp != 0 {
+        if exp & 1 != 0 {
+            acc_add = acc_add.wrapping_mul(mul).wrapping_add(add) & mask;
+            acc_mul = acc_mul.wrapping_mul(mul) & mask;
+        }
+        add = add.wrapping_mul(mul).wrapping_add(add) & mask;
+        mul = mul.wrapping_mul(mul) & mask;
+        exp >>= 1;
+    }
+    (acc_mul, acc_add)
+}
+
+fn affine_index_pow_masked(
+    mut state_mul: u64,
+    mut index_mul: u64,
+    mut add: u64,
+    mut exp: u64,
+    mask: u64,
+) -> (u64, u64, u64) {
+    let mut acc_state_mul = 1u64;
+    let mut acc_index_mul = 0u64;
+    let mut acc_add = 0u64;
+    let mut step_index_delta = 1u64;
+    let mut acc_index_delta = 0u64;
+    while exp != 0 {
+        if exp & 1 != 0 {
+            acc_add = state_mul
+                .wrapping_mul(acc_add)
+                .wrapping_add(index_mul.wrapping_mul(acc_index_delta))
+                .wrapping_add(add)
+                & mask;
+            acc_index_mul = state_mul
+                .wrapping_mul(acc_index_mul)
+                .wrapping_add(index_mul)
+                & mask;
+            acc_state_mul = state_mul.wrapping_mul(acc_state_mul) & mask;
+            acc_index_delta = acc_index_delta.wrapping_add(step_index_delta);
+        }
+        add = state_mul
+            .wrapping_mul(add)
+            .wrapping_add(index_mul.wrapping_mul(step_index_delta))
+            .wrapping_add(add)
+            & mask;
+        index_mul = state_mul.wrapping_mul(index_mul).wrapping_add(index_mul) & mask;
+        state_mul = state_mul.wrapping_mul(state_mul) & mask;
+        step_index_delta = step_index_delta.wrapping_add(step_index_delta);
+        exp >>= 1;
+    }
+    (acc_state_mul, acc_index_mul, acc_add)
+}
+
+fn loop_has_external_body_entry(instrs: &[RuntimeInstr], info: CountedLoopInfo) -> bool {
+    instrs.iter().enumerate().any(|(idx, instr)| {
+        let target = match instr {
+            RuntimeInstr::Jump { target }
+            | RuntimeInstr::JumpIfZero { target, .. }
+            | RuntimeInstr::JumpIfCmpFalse { target, .. }
+            | RuntimeInstr::Call { target }
+            | RuntimeInstr::ThreadSpawn { target, .. } => *target,
+            _ => return false,
+        };
+        target > info.header && target <= info.latch && !(info.header..=info.latch).contains(&idx)
+    })
+}
+
+fn runtime_instr_written_slots(instr: &RuntimeInstr) -> Vec<usize> {
+    let slot_count = runtime_program_slot_count(std::slice::from_ref(instr));
+    (0..slot_count)
+        .filter(|slot| runtime_instr_writes_slot(instr, *slot))
+        .collect()
+}
+
+fn replace_runtime_instr_range(
+    instrs: &mut Vec<RuntimeInstr>,
+    start: usize,
+    end: usize,
+    replacement: Vec<RuntimeInstr>,
+) {
+    let old = std::mem::take(instrs);
+    let mut remap = vec![0usize; old.len() + 1];
+    let mut out = Vec::with_capacity(old.len() - (end - start) + replacement.len());
+    for idx in 0..start {
+        remap[idx] = out.len();
+        out.push(old[idx].clone());
+    }
+    let replacement_start = out.len();
+    for entry in remap.iter_mut().take(end).skip(start) {
+        *entry = replacement_start;
+    }
+    out.extend(replacement);
+    for idx in end..old.len() {
+        remap[idx] = out.len();
+        out.push(old[idx].clone());
+    }
+    remap[old.len()] = out.len();
+    for instr in &mut out {
+        let target = match instr {
+            RuntimeInstr::Jump { target }
+            | RuntimeInstr::JumpIfZero { target, .. }
+            | RuntimeInstr::JumpIfCmpFalse { target, .. }
+            | RuntimeInstr::Call { target }
+            | RuntimeInstr::ThreadSpawn { target, .. } => target,
+            _ => continue,
+        };
+        *target = remap[(*target).min(old.len())];
+    }
+    *instrs = out;
+}
+
 fn unroll_runtime_small_counted_loops(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
     stmts
         .into_iter()
@@ -1704,6 +2619,134 @@ fn unroll_runtime_small_counted_loops(stmts: Vec<LoweredStmt>) -> Vec<LoweredStm
             other => other,
         })
         .collect()
+}
+
+fn partial_unroll_runtime_counted_loops(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { mut program } => {
+                partial_unroll_runtime_counted_loops_in_program(&mut program.instrs);
+                LoweredStmt::RuntimeGeneric { program }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Estimate the scalar values that compete for registers in a loop body.
+///
+/// Fixed-array backing slots describe storage, not simultaneously live scalar
+/// values. Counting every element would incorrectly disable ordinary loop
+/// transforms as arrays grow, despite the generated operation using one
+/// indexed memory access.
+fn loop_scalar_pressure_hint(
+    instrs: &[RuntimeInstr],
+    body_start: usize,
+    body_end_exclusive: usize,
+    total_slots: usize,
+) -> usize {
+    let mut backing_slots = Vec::new();
+    for instr in &instrs[body_start..body_end_exclusive] {
+        let slots = match instr {
+            RuntimeInstr::LoadIndex { base_slots, .. }
+            | RuntimeInstr::LoadIndexUnchecked { base_slots, .. }
+            | RuntimeInstr::StoreIndex { base_slots, .. }
+            | RuntimeInstr::StoreIndexUnchecked { base_slots, .. } => base_slots,
+            _ => continue,
+        };
+        for slot in slots {
+            if !backing_slots.contains(slot) {
+                backing_slots.push(*slot);
+            }
+        }
+    }
+
+    (0..total_slots)
+        .filter(|slot| {
+            !backing_slots.contains(slot)
+                && instrs[body_start..body_end_exclusive].iter().any(|instr| {
+                    runtime_instr_reads_slot(instr, *slot)
+                        || runtime_instr_writes_slot(instr, *slot)
+                })
+        })
+        .count()
+}
+
+fn partial_unroll_factor(body_len: usize, scalar_pressure: usize) -> usize {
+    if body_len <= 12 && scalar_pressure <= 12 {
+        4
+    } else if body_len <= 24 && scalar_pressure <= 16 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Group iterations of a large, canonical counted loop without changing its
+/// scalar meaning. This is deliberately narrower than a remainder-producing
+/// unroller: the exact trip count must be divisible by the selected factor.
+/// Consequently the original guard remains valid and no speculative memory
+/// access, overflow, or extra side effect can be introduced.
+fn partial_unroll_runtime_counted_loops_in_program(instrs: &mut Vec<RuntimeInstr>) {
+    const MIN_GROUPS: u64 = 8;
+    const MAX_ADDED_INSTRS_PER_LOOP: usize = 96;
+
+    if instrs.is_empty() {
+        return;
+    }
+    let slot_count = runtime_program_slot_count(instrs);
+    let mut plans = Vec::<(CountedLoopInfo, usize)>::new();
+    for info in find_canonical_counted_loops(instrs) {
+        let LoopLimit::Imm(limit) = info.limit else {
+            continue;
+        };
+        let Some(trip_count) = limit.checked_sub(info.start) else {
+            continue;
+        };
+        if info.header + 1 > info.update_idx || info.update_idx >= info.latch {
+            continue;
+        }
+        if loop_has_external_body_entry(instrs, info) {
+            continue;
+        }
+
+        let body_start = info.header + 1;
+        let body_len = info.update_idx.saturating_sub(body_start);
+        if body_len == 0 {
+            continue;
+        }
+        let scalar_pressure =
+            loop_scalar_pressure_hint(instrs, body_start, info.update_idx, slot_count);
+        let factor = partial_unroll_factor(body_len, scalar_pressure);
+        if factor == 1
+            || trip_count < (factor as u64).saturating_mul(MIN_GROUPS)
+            || trip_count % factor as u64 != 0
+        {
+            continue;
+        }
+
+        // The repeated unit includes the induction update and any proven tail
+        // normalization, but excludes the single loop backedge.
+        let unit_len = info.latch.saturating_sub(body_start);
+        if unit_len.saturating_mul(factor.saturating_sub(1)) > MAX_ADDED_INSTRS_PER_LOOP {
+            continue;
+        }
+        plans.push((info, factor));
+    }
+
+    // Replacements are independent and applying them from the end preserves
+    // every index captured by the structural analysis above.
+    plans.sort_by_key(|(info, _)| std::cmp::Reverse(info.header));
+    for (info, factor) in plans {
+        let start = info.header + 1;
+        let unit = instrs[start..info.latch].to_vec();
+        let mut replacement = Vec::with_capacity(unit.len().saturating_mul(factor));
+        for _ in 0..factor {
+            replacement.extend(unit.iter().cloned());
+        }
+        replace_runtime_instr_range(instrs, start, info.latch, replacement);
+    }
 }
 
 fn rewrite_unrolled_operand(
@@ -1859,52 +2902,6 @@ fn rewrite_unrolled_instr_with_index(
             dst_ptr: rewrite_unrolled_operand(*dst_ptr, ind_slot, iter_index),
             src_ptr: rewrite_unrolled_operand(*src_ptr, ind_slot, iter_index),
             bytes: rewrite_unrolled_operand(*bytes, ind_slot, iter_index),
-        },
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            RuntimeInstr::BloomSplitBlockInsert {
-                filter_slots: filter_slots.clone(),
-                hash: rewrite_unrolled_operand(*hash, ind_slot, iter_index),
-            }
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst,
-            filter_slots,
-            hash,
-        } => RuntimeInstr::BloomSplitBlockCheck {
-            dst: *dst,
-            filter_slots: filter_slots.clone(),
-            hash: rewrite_unrolled_operand(*hash, ind_slot, iter_index),
-        },
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => RuntimeInstr::BloomClassic4Check {
-            dst: *dst,
-            lanes_checked: *lanes_checked,
-            filter_slots: filter_slots.clone(),
-            hash: rewrite_unrolled_operand(*hash, ind_slot, iter_index),
-        },
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            group_start,
-            fingerprint,
-        } => RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask: *dst_mask,
-            ctrl_slots: ctrl_slots.clone(),
-            group_start: rewrite_unrolled_operand(*group_start, ind_slot, iter_index),
-            fingerprint: rewrite_unrolled_operand(*fingerprint, ind_slot, iter_index),
-        },
-        RuntimeInstr::JoinSelectAdaptive {
-            dst,
-            build_rows,
-            probe_rows,
-        } => RuntimeInstr::JoinSelectAdaptive {
-            dst: *dst,
-            build_rows: rewrite_unrolled_operand(*build_rows, ind_slot, iter_index),
-            probe_rows: rewrite_unrolled_operand(*probe_rows, ind_slot, iter_index),
         },
         RuntimeInstr::Alloc { dst, size } => RuntimeInstr::Alloc {
             dst: *dst,
@@ -2204,11 +3201,6 @@ fn unroll_runtime_small_counted_loops_in_program(instrs: &mut Vec<RuntimeInstr>)
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -2517,249 +3509,6 @@ fn runtime_slot_mask_bound_before(
     }
 }
 
-fn bump_runtime_targets_from(instrs: &mut [RuntimeInstr], from: usize, delta: usize) {
-    for instr in instrs {
-        match instr {
-            RuntimeInstr::Jump { target }
-            | RuntimeInstr::JumpIfZero { target, .. }
-            | RuntimeInstr::JumpIfCmpFalse { target, .. }
-            | RuntimeInstr::Call { target } => {
-                if *target >= from {
-                    *target += delta;
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn slot_def_idx_in_loop_body(
-    instrs: &[RuntimeInstr],
-    body_start: usize,
-    use_idx: usize,
-    slot: usize,
-) -> Option<usize> {
-    if use_idx <= body_start {
-        return None;
-    }
-    for idx in (body_start..use_idx).rev() {
-        if !runtime_instr_writes_slot(&instrs[idx], slot) {
-            continue;
-        }
-        if matches!(&instrs[idx], RuntimeInstr::NormalizeInt { dst, .. } if *dst == slot) {
-            continue;
-        }
-        return Some(idx);
-    }
-    None
-}
-
-fn runtime_operand_loop_invariant(
-    instrs: &[RuntimeInstr],
-    info: CountedLoopInfo,
-    operand: RuntimeOperand,
-) -> bool {
-    match operand {
-        RuntimeOperand::Imm(_) => true,
-        RuntimeOperand::Slot(slot) => !slot_written_in_loop(instrs, info, slot),
-    }
-}
-
-fn derive_group_start_for_grouped_probe(
-    instrs: &[RuntimeInstr],
-    info: CountedLoopInfo,
-    load_idx: usize,
-    base_len: usize,
-    index: RuntimeOperand,
-) -> Option<RuntimeOperand> {
-    if info.start != 0 || base_len < 16 || !base_len.is_power_of_two() {
-        return None;
-    }
-    match index {
-        RuntimeOperand::Slot(slot) if slot == info.ind_slot && base_len == 16 => {
-            Some(RuntimeOperand::Imm(0))
-        }
-        RuntimeOperand::Slot(idx_slot) => {
-            let body_start = info.header + 1;
-            let bitand_idx = slot_def_idx_in_loop_body(instrs, body_start, load_idx, idx_slot)?;
-            let RuntimeInstr::BinOp {
-                dst,
-                op: RuntimeBinOp::BitAnd,
-                lhs,
-                rhs,
-            } = instrs[bitand_idx]
-            else {
-                return None;
-            };
-            if dst != idx_slot {
-                return None;
-            }
-            let mask = match (lhs, rhs) {
-                (RuntimeOperand::Imm(m), RuntimeOperand::Slot(v))
-                | (RuntimeOperand::Slot(v), RuntimeOperand::Imm(m)) => (m, v),
-                _ => return None,
-            };
-            if mask.0 != (base_len as u64).wrapping_sub(1) {
-                return None;
-            }
-            let add_slot = mask.1;
-            let add_idx = slot_def_idx_in_loop_body(instrs, body_start, bitand_idx, add_slot)?;
-            let RuntimeInstr::BinOp {
-                dst,
-                op: RuntimeBinOp::Add,
-                lhs,
-                rhs,
-            } = instrs[add_idx]
-            else {
-                return None;
-            };
-            if dst != add_slot {
-                return None;
-            }
-            let group_start = match (lhs, rhs) {
-                (RuntimeOperand::Slot(slot), other) if slot == info.ind_slot => other,
-                (other, RuntimeOperand::Slot(slot)) if slot == info.ind_slot => other,
-                _ => return None,
-            };
-            runtime_operand_loop_invariant(instrs, info, group_start).then_some(group_start)
-        }
-        RuntimeOperand::Imm(_) => None,
-    }
-}
-
-fn loop_has_external_entry_to_header(instrs: &[RuntimeInstr], info: CountedLoopInfo) -> bool {
-    for (idx, instr) in instrs.iter().enumerate() {
-        let target = match instr {
-            RuntimeInstr::Jump { target }
-            | RuntimeInstr::JumpIfZero { target, .. }
-            | RuntimeInstr::JumpIfCmpFalse { target, .. }
-            | RuntimeInstr::Call { target } => *target,
-            _ => continue,
-        };
-        if target == info.header && (idx < info.header || idx > info.latch) {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_relaxed_counted_loops(instrs: &[RuntimeInstr]) -> Vec<CountedLoopInfo> {
-    let mut loops = Vec::new();
-    for latch in 0..instrs.len() {
-        let RuntimeInstr::Jump { target: header } = instrs[latch] else {
-            continue;
-        };
-        if header >= latch || header == 0 {
-            continue;
-        }
-
-        let (op, lhs, rhs, exit_target) = match &instrs[header] {
-            RuntimeInstr::JumpIfCmpFalse {
-                op,
-                lhs,
-                rhs,
-                target,
-            } => (*op, *lhs, *rhs, *target),
-            _ => continue,
-        };
-        if op != RuntimeCmpOp::LtUnsigned {
-            continue;
-        }
-        let RuntimeOperand::Slot(ind_slot) = lhs else {
-            continue;
-        };
-        let limit = match rhs {
-            RuntimeOperand::Imm(limit) => LoopLimit::Imm(limit),
-            RuntimeOperand::Slot(slot) => LoopLimit::Slot(slot),
-        };
-        if exit_target <= latch || exit_target > instrs.len() {
-            continue;
-        }
-
-        let mut start = None;
-        for idx in (0..header).rev() {
-            if !runtime_instr_writes_slot(&instrs[idx], ind_slot) {
-                continue;
-            }
-            if let RuntimeInstr::Mov {
-                dst,
-                src: RuntimeOperand::Imm(init),
-            } = instrs[idx]
-            {
-                if dst == ind_slot {
-                    start = Some(init);
-                }
-            }
-            break;
-        }
-        let Some(start) = start else {
-            continue;
-        };
-        if matches!(limit, LoopLimit::Imm(v) if start > v) {
-            continue;
-        }
-
-        let (update_idx, tail_norm_idx) = if latch > header + 1 {
-            match &instrs[latch - 1] {
-                RuntimeInstr::BinOpInPlace {
-                    dst,
-                    op: RuntimeBinOp::Add,
-                    rhs: RuntimeOperand::Imm(1),
-                } if *dst == ind_slot => (latch - 1, None),
-                RuntimeInstr::NormalizeInt { dst, .. } if *dst == ind_slot => {
-                    let update_idx = latch.saturating_sub(2);
-                    let is_update = matches!(
-                        instrs.get(update_idx),
-                        Some(RuntimeInstr::BinOpInPlace {
-                            dst,
-                            op: RuntimeBinOp::Add,
-                            rhs: RuntimeOperand::Imm(1),
-                        }) if *dst == ind_slot
-                    );
-                    if is_update {
-                        (update_idx, Some(latch - 1))
-                    } else {
-                        continue;
-                    }
-                }
-                _ => continue,
-            }
-        } else {
-            continue;
-        };
-
-        let mut valid = true;
-        for idx in (header + 1)..latch {
-            if idx == update_idx || Some(idx) == tail_norm_idx {
-                continue;
-            }
-            if runtime_instr_writes_slot(&instrs[idx], ind_slot) {
-                valid = false;
-                break;
-            }
-            if matches!(limit, LoopLimit::Slot(limit_slot) if runtime_instr_writes_slot(&instrs[idx], limit_slot))
-            {
-                valid = false;
-                break;
-            }
-        }
-        if !valid {
-            continue;
-        }
-
-        loops.push(CountedLoopInfo {
-            header,
-            latch,
-            exit_target,
-            start,
-            ind_slot,
-            limit,
-            update_idx,
-        });
-    }
-    loops
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SlotFacts {
     upper: Option<u64>,
@@ -2901,58 +3650,6 @@ fn runtime_program_slot_count(instrs: &[RuntimeInstr]) -> usize {
                 bump_operand(&mut max_slot, &mut saw_any, dst_ptr);
                 bump_operand(&mut max_slot, &mut saw_any, src_ptr);
                 bump_operand(&mut max_slot, &mut saw_any, bytes);
-            }
-            RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-                for slot in filter_slots {
-                    bump_slot(&mut max_slot, &mut saw_any, *slot);
-                }
-                bump_operand(&mut max_slot, &mut saw_any, hash);
-            }
-            RuntimeInstr::BloomSplitBlockCheck {
-                dst,
-                filter_slots,
-                hash,
-            } => {
-                bump_slot(&mut max_slot, &mut saw_any, *dst);
-                for slot in filter_slots {
-                    bump_slot(&mut max_slot, &mut saw_any, *slot);
-                }
-                bump_operand(&mut max_slot, &mut saw_any, hash);
-            }
-            RuntimeInstr::BloomClassic4Check {
-                dst,
-                lanes_checked,
-                filter_slots,
-                hash,
-            } => {
-                bump_slot(&mut max_slot, &mut saw_any, *dst);
-                bump_slot(&mut max_slot, &mut saw_any, *lanes_checked);
-                for slot in filter_slots {
-                    bump_slot(&mut max_slot, &mut saw_any, *slot);
-                }
-                bump_operand(&mut max_slot, &mut saw_any, hash);
-            }
-            RuntimeInstr::HashCtrlGroupProbe {
-                dst_mask,
-                ctrl_slots,
-                group_start,
-                fingerprint,
-            } => {
-                bump_slot(&mut max_slot, &mut saw_any, *dst_mask);
-                for slot in ctrl_slots {
-                    bump_slot(&mut max_slot, &mut saw_any, *slot);
-                }
-                bump_operand(&mut max_slot, &mut saw_any, group_start);
-                bump_operand(&mut max_slot, &mut saw_any, fingerprint);
-            }
-            RuntimeInstr::JoinSelectAdaptive {
-                dst,
-                build_rows,
-                probe_rows,
-            } => {
-                bump_slot(&mut max_slot, &mut saw_any, *dst);
-                bump_operand(&mut max_slot, &mut saw_any, build_rows);
-                bump_operand(&mut max_slot, &mut saw_any, probe_rows);
             }
             RuntimeInstr::Alloc { dst, size } => {
                 bump_slot(&mut max_slot, &mut saw_any, *dst);
@@ -3227,42 +3924,6 @@ fn runtime_transfer_slot_facts(
                 set_slot(*slot, SlotFacts::unknown());
             }
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. } => {
-            for slot in filter_slots {
-                set_slot(*slot, SlotFacts::unknown());
-            }
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst, filter_slots, ..
-        } => {
-            set_slot(*dst, SlotFacts::unknown());
-            for slot in filter_slots {
-                set_slot(*slot, SlotFacts::unknown());
-            }
-        }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            ..
-        } => {
-            set_slot(*dst, SlotFacts::unknown());
-            set_slot(*lanes_checked, SlotFacts::unknown());
-            for slot in filter_slots {
-                set_slot(*slot, SlotFacts::unknown());
-            }
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            ..
-        } => {
-            set_slot(*dst_mask, SlotFacts::unknown());
-            for slot in ctrl_slots {
-                set_slot(*slot, SlotFacts::unknown());
-            }
-        }
-        RuntimeInstr::JoinSelectAdaptive { dst, .. } => set_slot(*dst, SlotFacts::unknown()),
         RuntimeInstr::Alloc { dst, .. } => set_slot(*dst, SlotFacts::unknown()),
         RuntimeInstr::FileOpen { dst, .. }
         | RuntimeInstr::FileWrite { dst, .. }
@@ -4143,18 +4804,6 @@ fn update_local_slot_upper_from_instr(
                 clear_local_slot_facts(*slot, local_upper, guarded_upper);
             }
         }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            ..
-        } => {
-            clear_local_slot_facts(*dst, local_upper, guarded_upper);
-            clear_local_slot_facts(*lanes_checked, local_upper, guarded_upper);
-            for slot in filter_slots {
-                clear_local_slot_facts(*slot, local_upper, guarded_upper);
-            }
-        }
         RuntimeInstr::LoadIndex { dst, .. } | RuntimeInstr::LoadIndexUnchecked { dst, .. } => {
             clear_local_slot_facts(*dst, local_upper, guarded_upper);
         }
@@ -4163,32 +4812,6 @@ fn update_local_slot_upper_from_instr(
         }
         RuntimeInstr::HeapStoreInt { .. } | RuntimeInstr::HeapCopy { .. } => {}
         RuntimeInstr::StoreIndex { .. } | RuntimeInstr::StoreIndexUnchecked { .. } => {}
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. } => {
-            for slot in filter_slots {
-                clear_local_slot_facts(*slot, local_upper, guarded_upper);
-            }
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst, filter_slots, ..
-        } => {
-            clear_local_slot_facts(*dst, local_upper, guarded_upper);
-            for slot in filter_slots {
-                clear_local_slot_facts(*slot, local_upper, guarded_upper);
-            }
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            ..
-        } => {
-            clear_local_slot_facts(*dst_mask, local_upper, guarded_upper);
-            for slot in ctrl_slots {
-                clear_local_slot_facts(*slot, local_upper, guarded_upper);
-            }
-        }
-        RuntimeInstr::JoinSelectAdaptive { dst, .. } => {
-            clear_local_slot_facts(*dst, local_upper, guarded_upper);
-        }
         RuntimeInstr::Alloc { dst, .. } => clear_local_slot_facts(*dst, local_upper, guarded_upper),
         RuntimeInstr::FileOpen { dst, .. }
         | RuntimeInstr::FileWrite { dst, .. }
@@ -4560,11 +5183,6 @@ fn shift_runtime_targets_for_insert(instrs: &mut [RuntimeInstr], at: usize, amou
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -4907,58 +5525,6 @@ fn mark_used_slots(instr: &RuntimeInstr, used: &mut [bool]) {
             mark_operand_used(src_ptr, used);
             mark_operand_used(bytes, used);
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            for slot in filter_slots {
-                mark_slot_used(*slot, used);
-            }
-            mark_operand_used(hash, used);
-        }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => {
-            mark_slot_used(*dst, used);
-            mark_slot_used(*lanes_checked, used);
-            for slot in filter_slots {
-                mark_slot_used(*slot, used);
-            }
-            mark_operand_used(hash, used);
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst,
-            filter_slots,
-            hash,
-        } => {
-            mark_slot_used(*dst, used);
-            for slot in filter_slots {
-                mark_slot_used(*slot, used);
-            }
-            mark_operand_used(hash, used);
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            group_start,
-            fingerprint,
-        } => {
-            mark_slot_used(*dst_mask, used);
-            for slot in ctrl_slots {
-                mark_slot_used(*slot, used);
-            }
-            mark_operand_used(group_start, used);
-            mark_operand_used(fingerprint, used);
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            dst,
-            build_rows,
-            probe_rows,
-        } => {
-            mark_slot_used(*dst, used);
-            mark_operand_used(build_rows, used);
-            mark_operand_used(probe_rows, used);
-        }
         RuntimeInstr::Alloc { dst, size } => {
             mark_slot_used(*dst, used);
             mark_operand_used(size, used);
@@ -5124,58 +5690,6 @@ fn remap_instr_slots(instr: &mut RuntimeInstr, remap: &[usize]) {
             remap_operand_slots(src_ptr, remap);
             remap_operand_slots(bytes, remap);
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            for slot in filter_slots {
-                *slot = remap[*slot];
-            }
-            remap_operand_slots(hash, remap);
-        }
-        RuntimeInstr::BloomClassic4Check {
-            dst,
-            lanes_checked,
-            filter_slots,
-            hash,
-        } => {
-            *dst = remap[*dst];
-            *lanes_checked = remap[*lanes_checked];
-            for slot in filter_slots {
-                *slot = remap[*slot];
-            }
-            remap_operand_slots(hash, remap);
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            dst,
-            filter_slots,
-            hash,
-        } => {
-            *dst = remap[*dst];
-            for slot in filter_slots {
-                *slot = remap[*slot];
-            }
-            remap_operand_slots(hash, remap);
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            dst_mask,
-            ctrl_slots,
-            group_start,
-            fingerprint,
-        } => {
-            *dst_mask = remap[*dst_mask];
-            for slot in ctrl_slots {
-                *slot = remap[*slot];
-            }
-            remap_operand_slots(group_start, remap);
-            remap_operand_slots(fingerprint, remap);
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            dst,
-            build_rows,
-            probe_rows,
-        } => {
-            *dst = remap[*dst];
-            remap_operand_slots(build_rows, remap);
-            remap_operand_slots(probe_rows, remap);
-        }
         RuntimeInstr::Alloc { dst, size } => {
             *dst = remap[*dst];
             remap_operand_slots(size, remap);
@@ -5266,12 +5780,25 @@ fn find_canonical_counted_loops(instrs: &[RuntimeInstr]) -> Vec<CountedLoopInfo>
             continue;
         }
 
-        let start = match instrs[header - 1] {
-            RuntimeInstr::Mov {
-                dst,
-                src: RuntimeOperand::Imm(init),
-            } if dst == ind_slot => init,
-            _ => continue,
+        let mut start = None;
+        for idx in (0..header).rev() {
+            let candidate = &instrs[idx];
+            if runtime_instr_writes_slot(candidate, ind_slot) {
+                start = match candidate {
+                    RuntimeInstr::Mov {
+                        dst,
+                        src: RuntimeOperand::Imm(init),
+                    } if *dst == ind_slot => Some(*init),
+                    _ => None,
+                };
+                break;
+            }
+            if runtime_instr_has_control_flow(candidate) {
+                break;
+            }
+        }
+        let Some(start) = start else {
+            continue;
         };
         if matches!(limit, LoopLimit::Imm(v) if start > v) {
             continue;
@@ -5406,11 +5933,6 @@ fn simplify_runtime_control_flow_instrs(mut instrs: Vec<RuntimeInstr>) -> Vec<Ru
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5457,11 +5979,6 @@ fn simplify_runtime_control_flow_instrs(mut instrs: Vec<RuntimeInstr>) -> Vec<Ru
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5554,11 +6071,6 @@ fn compute_runtime_reachable(instrs: &[RuntimeInstr]) -> Vec<bool> {
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5629,11 +6141,6 @@ fn compact_runtime_instrs(instrs: Vec<RuntimeInstr>, reachable: &[bool]) -> Vec<
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5704,11 +6211,6 @@ fn compact_runtime_instrs(instrs: Vec<RuntimeInstr>, reachable: &[bool]) -> Vec<
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5769,11 +6271,6 @@ fn leaf_body_end(instrs: &[RuntimeInstr], target: usize) -> Option<usize> {
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. } => {}
             RuntimeInstr::PrintConst { .. } | RuntimeInstr::PrintInt { .. } => {}
@@ -5812,11 +6309,6 @@ fn remap_instr_targets_after_inline(instrs: &mut [RuntimeInstr], call_idx: usize
             | RuntimeInstr::HeapLoadInt { .. }
             | RuntimeInstr::HeapStoreInt { .. }
             | RuntimeInstr::HeapCopy { .. }
-            | RuntimeInstr::BloomSplitBlockInsert { .. }
-            | RuntimeInstr::BloomSplitBlockCheck { .. }
-            | RuntimeInstr::BloomClassic4Check { .. }
-            | RuntimeInstr::HashCtrlGroupProbe { .. }
-            | RuntimeInstr::JoinSelectAdaptive { .. }
             | RuntimeInstr::Alloc { .. }
             | RuntimeInstr::Free { .. }
             | RuntimeInstr::FileOpen { .. }
@@ -5969,10 +6461,6 @@ fn dead_print_elimination(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
                 break;
             }
             LoweredStmt::RuntimePrefixScanLoop { .. } => {
-                out.push(stmt);
-                break;
-            }
-            LoweredStmt::RuntimeBloomFilterLoop { .. } => {
                 out.push(stmt);
                 break;
             }
@@ -6134,7 +6622,7 @@ fn dead_print_elimination(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
     out
 }
 
-fn fold_runtime_kernels(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
+fn finish_runtime_lowering(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
     /*
     let mut out = Vec::with_capacity(stmts.len());
     for stmt in stmts {
@@ -6200,10 +6688,6 @@ fn fold_runtime_kernels(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
                 value_shift,
                 exit_mask,
             } => {
-                // Ring writes define this workload's memory-pressure behavior.
-                // Although the final checksum can be derived algebraically for
-                // some constant inputs, replacing the complete loop with
-                // `exit(const)` would invalidate benchmark comparability.
                 out.push(LoweredStmt::RuntimeRingWriteLoop {
                     iterations,
                     state_init,
@@ -6218,10 +6702,6 @@ fn fold_runtime_kernels(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt> {
                 break;
             }
             LoweredStmt::RuntimePrefixScanLoop { .. } => {
-                out.push(stmt);
-                break;
-            }
-            LoweredStmt::RuntimeBloomFilterLoop { .. } => {
                 out.push(stmt);
                 break;
             }
@@ -6403,117 +6883,149 @@ fn compose_affine_index(
     }
 }
 
-fn optimize_lcg_lookahead(instrs: &mut Vec<RuntimeInstr>) {
-    let mut i = 0usize;
-    while i < instrs.len() {
-        // Detect state = state * A + B sequences
-        let mut lookahead = Vec::new();
-        let mut curr_idx = i;
-        let mut state_slot = None;
+#[derive(Clone, Copy)]
+struct StraightAffineStep {
+    start: usize,
+    state_slot: usize,
+    mul_slot: usize,
+    add_slot: usize,
+    narrowed_slot: usize,
+    mul: u64,
+    add: u64,
+    mask: u64,
+}
 
-        while curr_idx < instrs.len() {
-            if let RuntimeInstr::BinOpInPlace {
-                dst,
-                op,
-                rhs: RuntimeOperand::Imm(a),
-            } = &instrs[curr_idx]
+fn match_straight_affine_step(instrs: &[RuntimeInstr], start: usize) -> Option<StraightAffineStep> {
+    let (mul_slot, state_slot, mul) = match instrs.get(start)? {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::Mul,
+            lhs: RuntimeOperand::Slot(state),
+            rhs: RuntimeOperand::Imm(mul),
+        } => (*dst, *state, *mul),
+        _ => return None,
+    };
+    let (add_slot, add) = match instrs.get(start + 1)? {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::Add,
+            lhs: RuntimeOperand::Slot(source),
+            rhs: RuntimeOperand::Imm(add),
+        } if *source == mul_slot => (*dst, *add),
+        _ => return None,
+    };
+    let (narrowed_slot, mask) = match instrs.get(start + 2)? {
+        RuntimeInstr::BinOp {
+            dst,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(source),
+            rhs: RuntimeOperand::Imm(mask),
+        } if *source == add_slot && is_low_bits_mask(*mask) => (*dst, *mask),
+        _ => return None,
+    };
+    match instrs.get(start + 3)? {
+        RuntimeInstr::Mov {
+            dst,
+            src: RuntimeOperand::Slot(source),
+        } if *dst == state_slot && *source == narrowed_slot => {}
+        _ => return None,
+    }
+    Some(StraightAffineStep {
+        start,
+        state_slot,
+        mul_slot,
+        add_slot,
+        narrowed_slot,
+        mul,
+        add,
+        mask,
+    })
+}
+
+/// Breaks a straight-line chain of identical affine transitions into formulas
+/// relative to one saved input. Intermediate states remain available to all
+/// existing consumers, while the loop-carried multiply latency is removed.
+fn optimize_affine_lookahead(program: &mut RuntimeProgram) {
+    let mut search = 0usize;
+    while search < program.instrs.len() {
+        let Some(first) = match_straight_affine_step(&program.instrs, search) else {
+            search += 1;
+            continue;
+        };
+        let mut steps = vec![first];
+        let mut cursor = first.start + 4;
+        while cursor < program.instrs.len() {
+            if let Some(step) = match_straight_affine_step(&program.instrs, cursor)
+                && step.state_slot == first.state_slot
+                && step.mul == first.mul
+                && step.add == first.add
+                && step.mask == first.mask
             {
-                if *op == RuntimeBinOp::Mul {
-                    if let Some(next_idx) = curr_idx.checked_add(1) {
-                        if next_idx < instrs.len() {
-                            if let RuntimeInstr::BinOpInPlace {
-                                dst: dst2,
-                                op: op2,
-                                rhs: RuntimeOperand::Imm(b),
-                            } = &instrs[next_idx]
-                            {
-                                if *op2 == RuntimeBinOp::Add && dst == dst2 {
-                                    if state_slot.is_none() || state_slot == Some(*dst) {
-                                        state_slot = Some(*dst);
-                                        lookahead.push((curr_idx, *a, *b));
-                                        curr_idx += 2;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                steps.push(step);
+                cursor += 4;
+                continue;
             }
-            break;
+            let instr = &program.instrs[cursor];
+            if runtime_instr_has_control_flow(instr)
+                || runtime_instr_writes_slot(instr, first.state_slot)
+            {
+                break;
+            }
+            cursor += 1;
+        }
+        if steps.len() < 2 {
+            search = first.start + 4;
+            continue;
         }
 
-        if lookahead.len() >= 2 {
-            // Re-write lookahead into independent formulas
-            // X_2 = X_1 * A + B
-            // X_3 = X_2 * A + B = (X_1 * A + B) * A + B = X_1 * A^2 + (AB + B)
-            // ...
-            let slot = state_slot.unwrap();
-            let (mut total_a, mut total_b) = (1u64, 0u64);
-            let mut base_a = vec![1u64; lookahead.len() + 1];
-            let mut base_b = vec![0u64; lookahead.len() + 1];
-
-            let a = lookahead[0].1;
-            let b = lookahead[0].2;
-
-            for k in 1..=lookahead.len() {
-                total_b = total_b.wrapping_mul(a).wrapping_add(b);
-                total_a = total_a.wrapping_mul(a);
-                base_a[k] = total_a;
-                base_b[k] = total_b;
-            }
-
-            // Replace sequence with:
-            // temp = slot
-            // slot = temp * base_a[1] + base_b[1]
-            // slot = temp * base_a[2] + base_b[2]
-            // ...
-            // Wait, we need to keep the intermediate results if they are used!
-            // Actually, in our benchmarks, they are usually consumed (e.g. b ^= state).
-            // So we need to ensure we don't break consumers between the updates.
-
-            let mut safe = true;
-            for k in 0..lookahead.len() {
-                let start = lookahead[k].0;
-                // Check if slot is read between mul and add (unlikely) or after add before next lcg
-                let next_lcg_start = if k + 1 < lookahead.len() {
-                    lookahead[k + 1].0
-                } else {
-                    instrs.len()
-                };
-                for j in (start + 2)..next_lcg_start {
-                    if runtime_instr_reads_slot(&instrs[j], slot) {
-                        safe = false; // Consumer exists
-                        break;
-                    }
-                }
-                if !safe {
-                    break;
-                }
-            }
-
-            if safe && lookahead.len() >= 4 {
-                // Only parallelize if significant
-                // Transform serial LCGs into independent ones relative to loop start.
-                // This allows the CPU to issue all multiplications in parallel (ILP).
-                for k in 1..lookahead.len() {
-                    let (instr_idx, _, _) = lookahead[k];
-                    // Replace MUL with MUL by total_a[k]
-                    instrs[instr_idx] = RuntimeInstr::BinOpInPlace {
-                        dst: slot,
-                        op: RuntimeBinOp::Mul,
-                        rhs: RuntimeOperand::Imm(base_a[k]), // Correct relative to iteration 0
-                    };
-                    // Replace ADD with ADD by total_b[k]
-                    instrs[instr_idx + 1] = RuntimeInstr::BinOpInPlace {
-                        dst: slot,
-                        op: RuntimeBinOp::Add,
-                        rhs: RuntimeOperand::Imm(base_b[k]),
-                    };
-                }
+        let base_slot = program.slots;
+        program.slots += 1;
+        let mut composed_mul = 1u64;
+        let mut composed_add = 0u64;
+        for step in &steps {
+            composed_mul = composed_mul.wrapping_mul(first.mul) & first.mask;
+            composed_add =
+                composed_add.wrapping_mul(first.mul).wrapping_add(first.add) & first.mask;
+            program.instrs[step.start] = RuntimeInstr::BinOp {
+                dst: step.mul_slot,
+                op: RuntimeBinOp::Mul,
+                lhs: RuntimeOperand::Slot(base_slot),
+                rhs: RuntimeOperand::Imm(composed_mul),
+            };
+            program.instrs[step.start + 1] = RuntimeInstr::BinOp {
+                dst: step.add_slot,
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(step.mul_slot),
+                rhs: RuntimeOperand::Imm(composed_add),
+            };
+            program.instrs[step.start + 2] = RuntimeInstr::BinOp {
+                dst: step.narrowed_slot,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(step.add_slot),
+                rhs: RuntimeOperand::Imm(first.mask),
+            };
+        }
+        for instr in &mut program.instrs {
+            let target = match instr {
+                RuntimeInstr::Jump { target }
+                | RuntimeInstr::JumpIfZero { target, .. }
+                | RuntimeInstr::JumpIfCmpFalse { target, .. }
+                | RuntimeInstr::Call { target }
+                | RuntimeInstr::ThreadSpawn { target, .. } => target,
+                _ => continue,
+            };
+            if *target > first.start {
+                *target += 1;
             }
         }
-        i += 1;
+        program.instrs.insert(
+            first.start,
+            RuntimeInstr::Mov {
+                dst: base_slot,
+                src: RuntimeOperand::Slot(first.state_slot),
+            },
+        );
+        search = cursor + 1;
     }
 }
 
@@ -6586,33 +7098,6 @@ fn runtime_instr_reads_slot(instr: &RuntimeInstr, slot: usize) -> bool {
                 || runtime_operand_reads_slot(index, slot)
                 || runtime_operand_reads_slot(src, slot)
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            filter_slots.contains(&slot) || runtime_operand_reads_slot(hash, slot)
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            filter_slots, hash, ..
-        }
-        | RuntimeInstr::BloomClassic4Check {
-            filter_slots, hash, ..
-        } => filter_slots.contains(&slot) || runtime_operand_reads_slot(hash, slot),
-        RuntimeInstr::HashCtrlGroupProbe {
-            ctrl_slots,
-            group_start,
-            fingerprint,
-            ..
-        } => {
-            ctrl_slots.contains(&slot)
-                || runtime_operand_reads_slot(group_start, slot)
-                || runtime_operand_reads_slot(fingerprint, slot)
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            build_rows,
-            probe_rows,
-            ..
-        } => {
-            runtime_operand_reads_slot(build_rows, slot)
-                || runtime_operand_reads_slot(probe_rows, slot)
-        }
         RuntimeInstr::Alloc { size, .. } => runtime_operand_reads_slot(size, slot),
         RuntimeInstr::Free { ptr, size } => {
             runtime_operand_reads_slot(ptr, slot) || runtime_operand_reads_slot(size, slot)
@@ -6659,13 +7144,6 @@ fn runtime_instr_writes_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         RuntimeInstr::HeapStoreInt { .. } | RuntimeInstr::HeapCopy { .. } => false,
         RuntimeInstr::StoreIndex { base_slots, .. }
         | RuntimeInstr::StoreIndexUnchecked { base_slots, .. } => base_slots.contains(&slot),
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. } => filter_slots.contains(&slot),
-        RuntimeInstr::BloomSplitBlockCheck { dst, .. } => *dst == slot,
-        RuntimeInstr::BloomClassic4Check {
-            dst, lanes_checked, ..
-        } => *dst == slot || *lanes_checked == slot,
-        RuntimeInstr::HashCtrlGroupProbe { dst_mask, .. } => *dst_mask == slot,
-        RuntimeInstr::JoinSelectAdaptive { dst, .. } => *dst == slot,
         RuntimeInstr::Alloc { dst, .. } => *dst == slot,
         RuntimeInstr::FileOpen { dst, .. }
         | RuntimeInstr::FileWrite { dst, .. }

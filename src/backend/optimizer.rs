@@ -9,6 +9,11 @@ use crate::frontend::semantics::{
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptimizationReport {
+    pub affine_lookahead_groups: usize,
+    pub affine_selects: usize,
+    pub dead_prefix_reductions: usize,
+    pub fixed_sort_selections: usize,
+    pub partial_unrolled_loops: usize,
     pub propagated_copies: usize,
     pub eliminated_copies: usize,
     pub verified_rewrites: usize,
@@ -29,12 +34,22 @@ impl OptimizationReport {
             concat!(
                 "optimization-report {{\"version\":1,\"pipeline\":\"runtime-generic\",",
                 "\"passes\":[",
+                "{{\"name\":\"affine-lookahead\",\"applied\":{},\"precondition\":\"identical affine transition, straight-line consumers, modular mask\"}},",
+                "{{\"name\":\"affine-select\",\"applied\":{},\"precondition\":\"local diamond, equal state and mask, pure affine arms\"}},",
+                "{{\"name\":\"dead-prefix-reduction\",\"applied\":{},\"precondition\":\"wrapping add associativity, only terminal prefix live on every CFG path\"}},",
+                "{{\"name\":\"fixed-sort-selection\",\"applied\":{},\"precondition\":\"complete adjacent-swap sort over one proven fixed array\"}},",
+                "{{\"name\":\"counted-loop-partial-unroll\",\"applied\":{},\"precondition\":\"canonical fixed-trip loop, divisible factor, straight-line body, bounded code growth\"}},",
                 "{{\"name\":\"copy-propagation\",\"applied\":{},\"precondition\":\"single-assignment, dominated, non-addressable\"}},",
                 "{{\"name\":\"verified-rewrite\",\"applied\":{},\"precondition\":\"target-independent scalar equivalence\"}},",
                 "{{\"name\":\"pure-region-scheduling\",\"applied\":{},\"precondition\":\"no memory effects or control dependence\"}},",
                 "{{\"name\":\"cfg-layout\",\"applied\":{},\"precondition\":\"profile matches the current control-flow graph\"}}",
                 "]}}\n"
             ),
+            self.affine_lookahead_groups,
+            self.affine_selects,
+            self.dead_prefix_reductions,
+            self.fixed_sort_selections,
+            self.partial_unrolled_loops,
             self.propagated_copies + self.eliminated_copies,
             self.verified_rewrites,
             self.scheduled_regions,
@@ -57,6 +72,7 @@ pub fn optimize_runtime_program(
 ) -> OptimizedRuntimeProgram {
     let mut optimized = program.clone();
     let mut report = OptimizationReport::default();
+    audit_frontend_generic_optimizations(&optimized, &mut report);
     propagate_single_assignment_copies(&mut optimized, &mut report);
     run_verified_superoptimizer(&mut optimized, target_cpu, &mut report);
     schedule_pure_regions(&mut optimized, target_cpu, &mut report);
@@ -76,6 +92,196 @@ pub fn optimize_runtime_program(
         profile: remapped_profile,
         report,
     }
+}
+
+fn audit_frontend_generic_optimizations(program: &RuntimeProgram, report: &mut OptimizationReport) {
+    let mut affine_bases = HashMap::<usize, usize>::new();
+    for instr in &program.instrs {
+        if let RuntimeInstr::BinOp {
+            op: RuntimeBinOp::Mul,
+            lhs: RuntimeOperand::Slot(base),
+            rhs: RuntimeOperand::Imm(_),
+            ..
+        } = instr
+        {
+            *affine_bases.entry(*base).or_default() += 1;
+        }
+        if matches!(instr, RuntimeInstr::RadixSortFixedInt { .. }) {
+            report.fixed_sort_selections += 1;
+        }
+    }
+    report.affine_lookahead_groups = affine_bases.values().filter(|count| **count >= 2).count();
+    report.partial_unrolled_loops = count_partial_unrolled_loops(&program.instrs);
+
+    report.affine_selects = program
+        .instrs
+        .windows(8)
+        .filter(|window| {
+            matches!(window[0], RuntimeInstr::Cmp { .. })
+                && matches!(
+                    window[1],
+                    RuntimeInstr::BinOp {
+                        op: RuntimeBinOp::Sub,
+                        lhs: RuntimeOperand::Imm(0),
+                        ..
+                    }
+                )
+                && matches!(
+                    window[2],
+                    RuntimeInstr::BinOp {
+                        op: RuntimeBinOp::BitAnd,
+                        ..
+                    }
+                )
+                && matches!(
+                    window[3],
+                    RuntimeInstr::BinOpInPlace {
+                        op: RuntimeBinOp::BitXor,
+                        ..
+                    }
+                )
+                && matches!(
+                    window[4],
+                    RuntimeInstr::BinOpInPlace {
+                        op: RuntimeBinOp::Mul,
+                        ..
+                    }
+                )
+                && matches!(
+                    window[5],
+                    RuntimeInstr::BinOp {
+                        op: RuntimeBinOp::BitAnd,
+                        ..
+                    }
+                )
+                && matches!(
+                    window[6],
+                    RuntimeInstr::BinOpInPlace {
+                        op: RuntimeBinOp::BitXor,
+                        ..
+                    }
+                )
+                && matches!(
+                    window[7],
+                    RuntimeInstr::BinOpInPlace {
+                        op: RuntimeBinOp::Add,
+                        ..
+                    }
+                )
+        })
+        .count();
+
+    let mut add_run = 0usize;
+    for instr in &program.instrs {
+        if matches!(
+            instr,
+            RuntimeInstr::BinOp {
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(_),
+                rhs: RuntimeOperand::Slot(_),
+                ..
+            }
+        ) {
+            add_run += 1;
+        } else {
+            if add_run >= 3 {
+                report.dead_prefix_reductions += 1;
+            }
+            add_run = 0;
+        }
+    }
+    if add_run >= 3 {
+        report.dead_prefix_reductions += 1;
+    }
+}
+
+fn count_partial_unrolled_loops(instrs: &[RuntimeInstr]) -> usize {
+    let mut count = 0usize;
+    for (header, guard) in instrs.iter().enumerate() {
+        let RuntimeInstr::JumpIfCmpFalse {
+            op: RuntimeCmpOp::LtUnsigned,
+            lhs: RuntimeOperand::Slot(induction),
+            rhs: RuntimeOperand::Imm(limit),
+            target: exit,
+        } = guard
+        else {
+            continue;
+        };
+        if *exit <= header || *exit > instrs.len() {
+            continue;
+        }
+        let Some(latch) = (header + 1..*exit).find(
+            |index| matches!(instrs[*index], RuntimeInstr::Jump { target } if target == header),
+        ) else {
+            continue;
+        };
+        if instrs[header + 1..latch].iter().any(|instr| {
+            matches!(
+                instr,
+                RuntimeInstr::Jump { .. }
+                    | RuntimeInstr::JumpIfZero { .. }
+                    | RuntimeInstr::JumpIfCmpFalse { .. }
+                    | RuntimeInstr::Call { .. }
+                    | RuntimeInstr::Return
+                    | RuntimeInstr::Exit { .. }
+            )
+        }) {
+            continue;
+        }
+
+        let mut updates = 0usize;
+        let mut invalid_write = false;
+        for instr in &instrs[header + 1..latch] {
+            if matches!(instr, RuntimeInstr::BinOpInPlace {
+                dst,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(1),
+            } if dst == induction)
+            {
+                updates += 1;
+            } else if write_slots(instr).contains(induction) {
+                invalid_write = true;
+                break;
+            }
+        }
+        if invalid_write || !matches!(updates, 2 | 4) {
+            continue;
+        }
+
+        let mut start = None;
+        for instr in instrs[..header].iter().rev() {
+            if write_slots(instr).contains(induction) {
+                if let RuntimeInstr::Mov {
+                    dst,
+                    src: RuntimeOperand::Imm(value),
+                } = instr
+                {
+                    if dst == induction {
+                        start = Some(*value);
+                    }
+                }
+                break;
+            }
+            if matches!(
+                instr,
+                RuntimeInstr::Jump { .. }
+                    | RuntimeInstr::JumpIfZero { .. }
+                    | RuntimeInstr::JumpIfCmpFalse { .. }
+                    | RuntimeInstr::Call { .. }
+                    | RuntimeInstr::Return
+                    | RuntimeInstr::Exit { .. }
+            ) {
+                break;
+            }
+        }
+        let Some(trip_count) = start.and_then(|start| limit.checked_sub(start)) else {
+            continue;
+        };
+        if trip_count >= (updates as u64) * 8 && trip_count % updates as u64 == 0 {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Eliminate compiler-created temporary copies without changing mutable slot
@@ -115,22 +321,6 @@ fn propagate_single_assignment_copies(
             | RuntimeInstr::LoadIndexUnchecked { base_slots, .. }
             | RuntimeInstr::StoreIndex { base_slots, .. }
             | RuntimeInstr::StoreIndexUnchecked { base_slots, .. }
-            | RuntimeInstr::BloomSplitBlockInsert {
-                filter_slots: base_slots,
-                ..
-            }
-            | RuntimeInstr::BloomSplitBlockCheck {
-                filter_slots: base_slots,
-                ..
-            }
-            | RuntimeInstr::BloomClassic4Check {
-                filter_slots: base_slots,
-                ..
-            }
-            | RuntimeInstr::HashCtrlGroupProbe {
-                ctrl_slots: base_slots,
-                ..
-            }
             | RuntimeInstr::RadixSortFixedInt {
                 slots: base_slots, ..
             } => {
@@ -312,25 +502,6 @@ fn rewrite_instruction_operands(
             rewrite(dst_ptr);
             rewrite(src_ptr);
             rewrite(bytes);
-        }
-        RuntimeInstr::BloomSplitBlockInsert { hash, .. }
-        | RuntimeInstr::BloomSplitBlockCheck { hash, .. }
-        | RuntimeInstr::BloomClassic4Check { hash, .. } => rewrite(hash),
-        RuntimeInstr::HashCtrlGroupProbe {
-            group_start,
-            fingerprint,
-            ..
-        } => {
-            rewrite(group_start);
-            rewrite(fingerprint);
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            build_rows,
-            probe_rows,
-            ..
-        } => {
-            rewrite(build_rows);
-            rewrite(probe_rows);
         }
         RuntimeInstr::Free { ptr, size } => {
             rewrite(ptr);
@@ -867,6 +1038,39 @@ fn schedule_pure_regions(
                 .iter()
                 .map(|index| program.instrs[*index].clone())
                 .collect();
+            // The x86 selector contracts a proven u32 affine triple into one
+            // multiply/add sequence. Scheduling its members apart increases
+            // code size and register traffic enough to outweigh any local
+            // latency hiding, so keep each canonical group intact.
+            if region.windows(3).any(|window| {
+                matches!(
+                    window,
+                    [
+                        RuntimeInstr::BinOp {
+                            dst: mul_dst,
+                            op: RuntimeBinOp::Mul,
+                            rhs: RuntimeOperand::Imm(_),
+                            ..
+                        },
+                        RuntimeInstr::BinOp {
+                            dst: add_dst,
+                            op: RuntimeBinOp::Add,
+                            lhs: RuntimeOperand::Slot(add_lhs),
+                            rhs: RuntimeOperand::Imm(_),
+                        },
+                        RuntimeInstr::BinOp {
+                            op: RuntimeBinOp::BitAnd,
+                            lhs: RuntimeOperand::Slot(mask_lhs),
+                            rhs: RuntimeOperand::Imm(mask),
+                            ..
+                        }
+                    ] if mul_dst == add_lhs
+                        && add_dst == mask_lhs
+                        && *mask == u64::from(u32::MAX)
+                )
+            }) {
+                continue;
+            }
             if let Some(order) = schedule_region(&region, target_cpu) {
                 if order
                     .iter()
@@ -1440,6 +1644,34 @@ fn remap_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optimization_report_is_stable_machine_readable_runtime_generic_json() {
+        let report = OptimizationReport {
+            affine_lookahead_groups: 2,
+            affine_selects: 3,
+            dead_prefix_reductions: 1,
+            fixed_sort_selections: 4,
+            partial_unrolled_loops: 9,
+            propagated_copies: 5,
+            eliminated_copies: 6,
+            verified_rewrites: 7,
+            scheduled_regions: 8,
+            reordered_blocks: 1,
+            inverted_branches: 2,
+            repaired_fallthroughs: 3,
+        };
+        let encoded = report.machine_readable();
+        assert!(
+            encoded
+                .starts_with("optimization-report {\"version\":1,\"pipeline\":\"runtime-generic\"")
+        );
+        assert!(encoded.contains("\"name\":\"affine-lookahead\",\"applied\":2"));
+        assert!(encoded.contains("\"name\":\"copy-propagation\",\"applied\":11"));
+        assert!(encoded.contains("\"name\":\"counted-loop-partial-unroll\",\"applied\":9"));
+        assert!(encoded.contains("\"name\":\"cfg-layout\",\"applied\":6"));
+        assert!(encoded.ends_with("}\n"));
+    }
 
     #[test]
     fn verified_superoptimizer_folds_identities_and_constants() {

@@ -3390,36 +3390,6 @@ impl<'a> RuntimeGenericBuilder<'a> {
                 Ok(())
             }
             Stmt::While { cond, body, .. } => {
-                if body.len() <= 8
-                    && runtime_while_body_is_straight_line(body)
-                    && !runtime_while_body_contains_direct_loop_control(body)
-                {
-                    let while_unroll_factor = if body.len() <= 4 { 8 } else { 4 };
-                    let loop_start = self.instrs.len();
-                    let mut cond_patches = Vec::with_capacity(while_unroll_factor);
-                    cond_patches.push(self.emit_jump_if_false(cond)?);
-                    let mut frames = Vec::with_capacity(while_unroll_factor);
-                    for iter in 0..while_unroll_factor {
-                        self.scopes.push();
-                        self.push_loop_frame(Some(loop_start));
-                        self.lower_stmts(body)?;
-                        let frame = self.pop_loop_frame()?;
-                        self.pop_scope_with_cleanup();
-                        frames.push(frame);
-                        if iter + 1 < while_unroll_factor {
-                            cond_patches.push(self.emit_jump_if_false(cond)?);
-                        }
-                    }
-                    self.emit(RuntimeInstr::Jump { target: loop_start });
-                    let loop_end = self.instrs.len();
-                    for patch in cond_patches {
-                        self.patch_target(patch, loop_end)?;
-                    }
-                    for frame in frames {
-                        self.patch_loop_frame_targets(frame, loop_start, loop_end)?;
-                    }
-                    return Ok(());
-                }
                 let loop_start = self.instrs.len();
                 let jz = self.emit_jump_if_false(cond)?;
                 self.scopes.push();

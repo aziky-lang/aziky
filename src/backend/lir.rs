@@ -738,7 +738,7 @@ fn known_bits_for_phi(phi: &SSAPhi, facts: &[KnownBits]) -> KnownBits {
 fn known_bits_for_instruction(
     instr: &RuntimeInstr,
     ssa_instr: &SSAInstruction,
-    written_slot: usize,
+    _written_slot: usize,
     facts: &[KnownBits],
 ) -> KnownBits {
     let operand_fact = |operand: &RuntimeOperand| match operand {
@@ -773,17 +773,7 @@ fn known_bits_for_instruction(
             slot_fact(*dst),
             operand_fact(rhs),
         ),
-        RuntimeInstr::Cmp { .. }
-        | RuntimeInstr::BloomSplitBlockCheck { .. }
-        | RuntimeInstr::JoinSelectAdaptive { .. } => KnownBits { zero: !1, one: 0 },
-        RuntimeInstr::BloomClassic4Check { dst, .. } if written_slot == *dst => {
-            KnownBits { zero: !1, one: 0 }
-        }
-        RuntimeInstr::BloomClassic4Check { lanes_checked, .. }
-            if written_slot == *lanes_checked =>
-        {
-            KnownBits { zero: !7, one: 0 }
-        }
+        RuntimeInstr::Cmp { .. } => KnownBits { zero: !1, one: 0 },
         RuntimeInstr::NormalizeInt {
             dst, signed, bits, ..
         } => {
@@ -1344,27 +1334,13 @@ fn memory_accesses_for_instruction(
 ) -> Vec<(usize, MemoryAccessKind)> {
     let (slots, kind): (&[usize], MemoryAccessKind) = match instr {
         RuntimeInstr::LoadIndex { base_slots, .. }
-        | RuntimeInstr::LoadIndexUnchecked { base_slots, .. }
-        | RuntimeInstr::BloomSplitBlockCheck {
-            filter_slots: base_slots,
-            ..
+        | RuntimeInstr::LoadIndexUnchecked { base_slots, .. } => {
+            (base_slots, MemoryAccessKind::Read)
         }
-        | RuntimeInstr::BloomClassic4Check {
-            filter_slots: base_slots,
-            ..
-        }
-        | RuntimeInstr::HashCtrlGroupProbe {
-            ctrl_slots: base_slots,
-            ..
-        } => (base_slots, MemoryAccessKind::Read),
         RuntimeInstr::StoreIndex { base_slots, .. }
         | RuntimeInstr::StoreIndexUnchecked { base_slots, .. } => {
             (base_slots, MemoryAccessKind::Write)
         }
-        RuntimeInstr::BloomSplitBlockInsert {
-            filter_slots: base_slots,
-            ..
-        } => (base_slots, MemoryAccessKind::ReadWrite),
         RuntimeInstr::RadixSortFixedInt { slots, .. } => (slots, MemoryAccessKind::ReadWrite),
         _ => return Vec::new(),
     };
@@ -2031,9 +2007,6 @@ fn infer_memory_objects(program: &RuntimeProgram) -> Vec<MemoryObject> {
             | RuntimeInstr::LoadIndexUnchecked { base_slots, .. }
             | RuntimeInstr::StoreIndex { base_slots, .. }
             | RuntimeInstr::StoreIndexUnchecked { base_slots, .. } => Some(base_slots),
-            RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. }
-            | RuntimeInstr::BloomSplitBlockCheck { filter_slots, .. } => Some(filter_slots),
-            RuntimeInstr::HashCtrlGroupProbe { ctrl_slots, .. } => Some(ctrl_slots),
             _ => None,
         };
         if let Some(slots) = slots {
@@ -2094,16 +2067,6 @@ fn infer_memory_objects(program: &RuntimeProgram) -> Vec<MemoryObject> {
                         runtime_const_index_for_access(base_slots, index).is_none(),
                         false,
                     ),
-                    RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. } => {
-                        (Some(filter_slots), true, true, true)
-                    }
-                    RuntimeInstr::BloomSplitBlockCheck { filter_slots, .. }
-                    | RuntimeInstr::BloomClassic4Check { filter_slots, .. } => {
-                        (Some(filter_slots), false, true, true)
-                    }
-                    RuntimeInstr::HashCtrlGroupProbe { ctrl_slots, .. } => {
-                        (Some(ctrl_slots), false, true, false)
-                    }
                     RuntimeInstr::RadixSortFixedInt {
                         slots: radix_slots, ..
                     } => (Some(radix_slots), true, true, false),
@@ -2317,25 +2280,6 @@ fn compute_force_stack(slot_count: usize, lir: &MachineLIRProgram) -> Vec<bool> 
                         }
                     }
                 }
-                RuntimeInstr::BloomSplitBlockInsert { filter_slots, .. }
-                | RuntimeInstr::BloomSplitBlockCheck { filter_slots, .. } => {
-                    for &slot in filter_slots {
-                        if slot < force_stack.len() {
-                            force_stack[slot] = true;
-                        }
-                    }
-                }
-                RuntimeInstr::HashCtrlGroupProbe { ctrl_slots, .. }
-                | RuntimeInstr::BloomClassic4Check {
-                    filter_slots: ctrl_slots,
-                    ..
-                } => {
-                    for &slot in ctrl_slots {
-                        if slot < force_stack.len() {
-                            force_stack[slot] = true;
-                        }
-                    }
-                }
                 _ => {}
             }
         }
@@ -2508,41 +2452,6 @@ pub(crate) fn read_slots(instr: &RuntimeInstr) -> Vec<usize> {
             out.extend(operand_slots(bytes));
             out
         }
-        RuntimeInstr::BloomSplitBlockInsert { filter_slots, hash } => {
-            let mut out = filter_slots.clone();
-            out.extend(operand_slots(hash));
-            out
-        }
-        RuntimeInstr::BloomSplitBlockCheck {
-            filter_slots, hash, ..
-        }
-        | RuntimeInstr::BloomClassic4Check {
-            filter_slots, hash, ..
-        } => {
-            let mut out = filter_slots.clone();
-            out.extend(operand_slots(hash));
-            out
-        }
-        RuntimeInstr::HashCtrlGroupProbe {
-            ctrl_slots,
-            group_start,
-            fingerprint,
-            ..
-        } => {
-            let mut out = ctrl_slots.clone();
-            out.extend(operand_slots(group_start));
-            out.extend(operand_slots(fingerprint));
-            out
-        }
-        RuntimeInstr::JoinSelectAdaptive {
-            build_rows,
-            probe_rows,
-            ..
-        } => {
-            let mut out = operand_slots(build_rows);
-            out.extend(operand_slots(probe_rows));
-            out
-        }
         RuntimeInstr::Alloc { size, .. } => operand_slots(size),
         RuntimeInstr::Free { ptr, size } => {
             let mut out = operand_slots(ptr);
@@ -2587,9 +2496,6 @@ pub(crate) fn write_slots(instr: &RuntimeInstr) -> Vec<usize> {
         | RuntimeInstr::LoadIndex { dst, .. }
         | RuntimeInstr::LoadIndexUnchecked { dst, .. }
         | RuntimeInstr::HeapLoadInt { dst, .. }
-        | RuntimeInstr::BloomSplitBlockCheck { dst, .. }
-        | RuntimeInstr::HashCtrlGroupProbe { dst_mask: dst, .. }
-        | RuntimeInstr::JoinSelectAdaptive { dst, .. }
         | RuntimeInstr::Alloc { dst, .. }
         | RuntimeInstr::FileOpen { dst, .. }
         | RuntimeInstr::FileWrite { dst, .. }
@@ -2601,9 +2507,6 @@ pub(crate) fn write_slots(instr: &RuntimeInstr) -> Vec<usize> {
         RuntimeInstr::ChannelCreate { dst, .. } | RuntimeInstr::ChannelRecv { dst, .. } => {
             vec![*dst]
         }
-        RuntimeInstr::BloomClassic4Check {
-            dst, lanes_checked, ..
-        } => vec![*dst, *lanes_checked],
         RuntimeInstr::CompareSwap { left, right, .. } => vec![*left, *right],
         RuntimeInstr::RadixSortFixedInt { slots, .. }
         | RuntimeInstr::StoreIndex {
@@ -2611,10 +2514,6 @@ pub(crate) fn write_slots(instr: &RuntimeInstr) -> Vec<usize> {
         }
         | RuntimeInstr::StoreIndexUnchecked {
             base_slots: slots, ..
-        }
-        | RuntimeInstr::BloomSplitBlockInsert {
-            filter_slots: slots,
-            ..
         } => slots.clone(),
         RuntimeInstr::Jump { .. }
         | RuntimeInstr::JumpIfZero { .. }

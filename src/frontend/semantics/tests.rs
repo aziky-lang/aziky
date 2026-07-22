@@ -1531,7 +1531,7 @@ fn lower_runtime_generic_shift_mask_index_uses_unchecked_index_ops() {
 }
 
 #[test]
-fn lower_runtime_generic_small_while_body_is_unrolled() {
+fn lower_runtime_generic_while_has_canonical_single_guard() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let arr: [u64; 2] = [1u64, 2u64]; let mut i: u64 = 0u64; while i < 4u64 { state = state + arr[i & 1u64]; i = i + 1u64; } exit(state); }";
     let tokens = lex(src).expect("lex failed");
     let program = parse(&tokens).expect("parse failed");
@@ -1555,7 +1555,7 @@ fn lower_runtime_generic_small_while_body_is_unrolled() {
             )
         })
         .count();
-    assert!(while_cond_checks >= 2);
+    assert_eq!(while_cond_checks, 1);
 }
 
 #[test]
@@ -4082,10 +4082,9 @@ fn benchmark_sources_lower_through_generic_runtime_ir_only() {
         let tokens = lex(src).expect("benchmark lex failed");
         let parsed = parse(&tokens).expect("benchmark parse failed");
         let lowered = lower_program(&parsed).expect("benchmark lowering failed");
-        assert!(
-            matches!(lowered.first(), Some(super::LoweredStmt::RuntimeGeneric { .. })),
-            "benchmark did not lower through RuntimeGeneric"
-        );
+        let Some(super::LoweredStmt::RuntimeGeneric { .. }) = lowered.first() else {
+            panic!("benchmark did not lower through RuntimeGeneric");
+        };
     }
 }
 

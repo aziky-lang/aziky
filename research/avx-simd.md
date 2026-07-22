@@ -67,7 +67,7 @@ The emitted code revealed four general lowering problems:
 
 Implemented corrections:
 
-- Fuse `BloomClassic4Check` with a following `result == 1` false branch only when the result has no later read and the source lane counter is globally unobserved. Each failed `BT` then branches directly to the rejection target.
+- Fuse a fixed-group bit-test result with a following boolean branch only when the result has no later read and every memory and control-flow precondition is proven. A scalar backend may then branch directly on the failed bit test.
 - Eliminate overwritten `Mov` instructions only along straight-line code, stopping at reads and every control-flow boundary, and remap all targets deterministically.
 - Emit three-operand 32-bit `IMUL` and 32-bit `ADD` directly into a register-allocated affine destination, with the stack fallback retained.
 - Reuse a dead input register for `shift-left` followed by OR only after proving the shifted temporary and original input are not read before redefinition.

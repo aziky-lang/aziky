@@ -37,8 +37,6 @@ fn builder_interns_duplicate_messages() {
     assert_eq!(count, 1);
 }
 
-
-
 #[test]
 fn affine_pow_64_steps_matches_scalar_recurrence() {
     let mul = 1_664_525u64;
@@ -109,43 +107,9 @@ fn reversible_u32_affine_pair_recovers_every_demanded_predecessor_bit() {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn contains_jne(code: &[u8]) -> bool {
     code.windows(2).any(|w| w == [0x0F, 0x85] || w[0] == 0x75)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[test]
 fn runtime_generic_program_emits_control_flow() {
@@ -651,11 +615,11 @@ fn runtime_generic_radix_sort_kernel_emits_cpu_dispatch_and_xgetbv() {
 }
 
 #[test]
-fn runtime_generic_radix_sort_kernel_64lane_uses_small_kernel_without_cpu_dispatch() {
+fn runtime_generic_radix_sort_kernel_8lane_uses_small_network_without_cpu_dispatch() {
     let mut x = X86Program::new();
-    let slots: Vec<usize> = (0..64usize).collect();
+    let slots: Vec<usize> = (0..8usize).collect();
     let program = RuntimeProgram {
-        slots: 64,
+        slots: 8,
         instrs: vec![
             RuntimeInstr::RadixSortFixedInt {
                 slots,
@@ -1361,6 +1325,477 @@ fn runtime_generic_indexed_bit_test_fusion_emits_bt_mem() {
 }
 
 #[test]
+fn indexed_bit_test_accumulation_is_local_and_liveness_proven() {
+    let mut program = RuntimeProgram {
+        slots: 8,
+        instrs: vec![
+            RuntimeInstr::LoadIndexUnchecked {
+                dst: 4,
+                base_slots: vec![0, 1, 2, 3],
+                index: RuntimeOperand::Slot(5),
+            },
+            RuntimeInstr::BinOp {
+                dst: 6,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(4),
+                rhs: RuntimeOperand::Slot(7),
+            },
+            RuntimeInstr::BinOp {
+                dst: 6,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(6),
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: 5,
+                op: RuntimeBinOp::BitAnd,
+                rhs: RuntimeOperand::Slot(6),
+            },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(5),
+            },
+        ],
+    };
+    let incoming = vec![false; program.instrs.len()];
+    let fusion = runtime_bit_test_accumulate_fusion_candidate(&program, 0, &incoming)
+        .expect("generic indexed bit-test reduction should fuse");
+    assert_eq!(fusion.dst, 5);
+    assert!(matches!(fusion.accumulator, RuntimeOperand::Slot(5)));
+
+    // Observing the extracted boolean after the reduction invalidates the
+    // dead-temporary proof and must retain the scalar sequence.
+    program.instrs.insert(
+        4,
+        RuntimeInstr::PrintInt {
+            value: RuntimeOperand::Slot(6),
+            signed: false,
+            bits: 64,
+        },
+    );
+    let incoming = vec![false; program.instrs.len()];
+    assert!(runtime_bit_test_accumulate_fusion_candidate(&program, 0, &incoming).is_none());
+}
+
+#[test]
+fn indexed_bit_accumulation_coalesces_a_later_unobserved_copy_back() {
+    let program = RuntimeProgram {
+        slots: 12,
+        instrs: vec![
+            RuntimeInstr::LoadIndexUnchecked {
+                dst: 4,
+                base_slots: vec![0, 1, 2, 3],
+                index: RuntimeOperand::Slot(5),
+            },
+            RuntimeInstr::BinOp {
+                dst: 6,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(4),
+                rhs: RuntimeOperand::Slot(7),
+            },
+            RuntimeInstr::BinOp {
+                dst: 6,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(6),
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOp {
+                dst: 8,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(9),
+                rhs: RuntimeOperand::Slot(6),
+            },
+            RuntimeInstr::BinOp {
+                dst: 10,
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(11),
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::Mov {
+                dst: 9,
+                src: RuntimeOperand::Slot(8),
+            },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(9),
+            },
+        ],
+    };
+    let incoming = vec![false; program.instrs.len()];
+    let fusion = runtime_bit_test_accumulate_fusion_candidate(&program, 0, &incoming)
+        .expect("copy-back form should fuse");
+    assert_eq!(fusion.dst, 9);
+    assert_eq!(fusion.suppressed_copy, Some(5));
+}
+
+#[test]
+fn indexed_bit_accumulation_folds_general_power_of_two_address_expressions() {
+    let base_slots: Vec<usize> = (0..32).collect();
+    let program = RuntimeProgram {
+        slots: 44,
+        instrs: vec![
+            RuntimeInstr::BinOp {
+                dst: 33,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(32),
+                rhs: RuntimeOperand::Imm(17),
+            },
+            RuntimeInstr::BinOp {
+                dst: 34,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(33),
+                rhs: RuntimeOperand::Imm(31),
+            },
+            RuntimeInstr::Mov {
+                dst: 42,
+                src: RuntimeOperand::Slot(34),
+            },
+            RuntimeInstr::BinOp {
+                dst: 35,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(32),
+                rhs: RuntimeOperand::Imm(41),
+            },
+            RuntimeInstr::BinOp {
+                dst: 36,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Imm(63),
+                rhs: RuntimeOperand::Slot(35),
+            },
+            RuntimeInstr::Mov {
+                dst: 43,
+                src: RuntimeOperand::Slot(36),
+            },
+            RuntimeInstr::Mov {
+                dst: 40,
+                src: RuntimeOperand::Slot(34),
+            },
+            RuntimeInstr::Mov {
+                dst: 41,
+                src: RuntimeOperand::Slot(36),
+            },
+            RuntimeInstr::LoadIndexUnchecked {
+                dst: 37,
+                base_slots,
+                index: RuntimeOperand::Slot(40),
+            },
+            RuntimeInstr::BinOp {
+                dst: 38,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(37),
+                rhs: RuntimeOperand::Slot(41),
+            },
+            RuntimeInstr::BinOp {
+                dst: 38,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(38),
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOp {
+                dst: 39,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Imm(1),
+                rhs: RuntimeOperand::Slot(38),
+            },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(39),
+            },
+        ],
+    };
+    let incoming = vec![false; program.instrs.len()];
+    let fusion = runtime_bit_test_accumulate_fusion_candidate(&program, 8, &incoming)
+        .expect("the local indexed bit accumulation should fuse");
+
+    let index = fusion
+        .index_expression
+        .expect("a proven 32-element address expression should fold");
+    assert_eq!(index.shift, 17);
+    assert_eq!(index.mask, 31);
+    assert_eq!(index.suppressed_instrs, [0, 1, 2, 6]);
+    let bit = fusion
+        .bit_expression
+        .expect("the u64 shift-count expression should fold");
+    assert_eq!(bit.shift, 41);
+    assert_eq!(bit.mask, 63);
+    assert_eq!(bit.suppressed_instrs, [3, 4, 5, 7]);
+}
+
+#[test]
+fn indexed_bit_address_fold_rejects_wrong_mask_and_observed_temporaries() {
+    let base_slots: Vec<usize> = (0..32).collect();
+    let mut program = RuntimeProgram {
+        slots: 41,
+        instrs: vec![
+            RuntimeInstr::BinOp {
+                dst: 33,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(32),
+                rhs: RuntimeOperand::Imm(9),
+            },
+            RuntimeInstr::BinOp {
+                dst: 34,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(33),
+                rhs: RuntimeOperand::Imm(30),
+            },
+            RuntimeInstr::Mov {
+                dst: 35,
+                src: RuntimeOperand::Slot(32),
+            },
+            RuntimeInstr::BinOp {
+                dst: 36,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(35),
+                rhs: RuntimeOperand::Imm(63),
+            },
+            RuntimeInstr::LoadIndexUnchecked {
+                dst: 37,
+                base_slots,
+                index: RuntimeOperand::Slot(34),
+            },
+            RuntimeInstr::BinOp {
+                dst: 38,
+                op: RuntimeBinOp::ShrUnsigned,
+                lhs: RuntimeOperand::Slot(37),
+                rhs: RuntimeOperand::Slot(36),
+            },
+            RuntimeInstr::BinOp {
+                dst: 38,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(38),
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOp {
+                dst: 39,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Imm(1),
+                rhs: RuntimeOperand::Slot(38),
+            },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(39),
+            },
+        ],
+    };
+    let incoming = vec![false; program.instrs.len()];
+    let fusion = runtime_bit_test_accumulate_fusion_candidate(&program, 4, &incoming)
+        .expect("the containing local bit accumulation remains legal");
+    assert!(
+        fusion.index_expression.is_none(),
+        "mask 30 does not prove an in-bounds index for a 32-element array"
+    );
+    assert!(fusion.bit_expression.is_some());
+
+    program.instrs[1] = RuntimeInstr::BinOp {
+        dst: 34,
+        op: RuntimeBinOp::BitAnd,
+        lhs: RuntimeOperand::Slot(33),
+        rhs: RuntimeOperand::Imm(31),
+    };
+    program.instrs.insert(
+        2,
+        RuntimeInstr::PrintInt {
+            value: RuntimeOperand::Slot(33),
+            signed: false,
+            bits: 64,
+        },
+    );
+    let incoming = vec![false; program.instrs.len()];
+    let fusion = runtime_bit_test_accumulate_fusion_candidate(&program, 5, &incoming)
+        .expect("observing the address temporary need not disable outer bit fusion");
+    assert!(
+        fusion.index_expression.is_none(),
+        "an observable producer may never be suppressed"
+    );
+}
+
+fn indexed_bit_accumulation_program() -> RuntimeProgram {
+    let base_slots: Vec<usize> = (0..32).collect();
+    let mut instrs = (0..32)
+        .map(|dst| RuntimeInstr::Mov {
+            dst,
+            src: RuntimeOperand::Imm(0),
+        })
+        .collect::<Vec<_>>();
+    instrs.extend([
+        RuntimeInstr::LoadSeed {
+            dst: 32,
+            kind: RuntimeLoadKind::EntropySeed,
+            input: None,
+        },
+        RuntimeInstr::Mov {
+            dst: 33,
+            src: RuntimeOperand::Imm(7),
+        },
+        RuntimeInstr::Mov {
+            dst: 34,
+            src: RuntimeOperand::Imm(1),
+        },
+        RuntimeInstr::Mov {
+            dst: 38,
+            src: RuntimeOperand::Imm(0x1_0000_0000),
+        },
+        RuntimeInstr::StoreIndexUnchecked {
+            base_slots: base_slots.clone(),
+            index: RuntimeOperand::Slot(32),
+            src: RuntimeOperand::Slot(38),
+        },
+        RuntimeInstr::LoadIndexUnchecked {
+            dst: 35,
+            base_slots,
+            index: RuntimeOperand::Slot(32),
+        },
+        RuntimeInstr::BinOp {
+            dst: 36,
+            op: RuntimeBinOp::ShrUnsigned,
+            lhs: RuntimeOperand::Slot(35),
+            rhs: RuntimeOperand::Slot(33),
+        },
+        RuntimeInstr::BinOp {
+            dst: 36,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(36),
+            rhs: RuntimeOperand::Imm(1),
+        },
+        RuntimeInstr::BinOp {
+            dst: 37,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(34),
+            rhs: RuntimeOperand::Slot(36),
+        },
+        RuntimeInstr::Exit {
+            code: RuntimeOperand::Slot(37),
+        },
+    ]);
+    RuntimeProgram { slots: 39, instrs }
+}
+
+#[test]
+fn indexed_bit_accumulation_selects_best_legal_bmi2_memory_shift() {
+    let mut x = X86Program::new();
+    x.emit_runtime_generic_program(&indexed_bit_accumulation_program());
+    let code = x.finalize();
+    assert!(
+        code.windows(5)
+            .any(|window| window[0] == 0xC4 && window[3] == 0xF7),
+        "expected automatic SHRX memory selection for the configured target"
+    );
+}
+
+#[test]
+fn unsigned_low_bit_masks_select_canonical_zero_extensions() {
+    let mut low_byte = X86Program::new();
+    low_byte.emit_mask_unsigned_low_bits(1, 0xFF);
+    assert_eq!(low_byte.code, [0x0F, 0xB6, 0xC9]); // movzx ecx, cl
+
+    let mut extended_byte = X86Program::new();
+    extended_byte.emit_mask_unsigned_low_bits(8, 0xFF);
+    assert_eq!(extended_byte.code, [0x45, 0x0F, 0xB6, 0xC0]); // movzx r8d, r8b
+
+    let mut low_word = X86Program::new();
+    low_word.emit_mask_unsigned_low_bits(2, 0xFFFF);
+    assert_eq!(low_word.code, [0x0F, 0xB7, 0xD2]); // movzx edx, dx
+
+    let mut low_dword = X86Program::new();
+    low_dword.emit_mask_unsigned_low_bits(1, u32::MAX);
+    assert_eq!(low_dword.code, [0x89, 0xC9]); // mov ecx, ecx
+
+    let mut direct_byte = X86Program::new();
+    direct_byte.emit_mask_unsigned_low_bits_from_reg(1, 3, 0xFF);
+    assert_eq!(direct_byte.code, [0x0F, 0xB6, 0xCB]); // movzx ecx, bl
+}
+
+#[test]
+fn non_destructive_rotate_extract_encodes_all_register_banks() {
+    let cases = [
+        (0, 1, 8, vec![0xC4, 0xE3, 0xFB, 0xF0, 0xC1, 0x08]),
+        (11, 15, 17, vec![0xC4, 0x43, 0xFB, 0xF0, 0xDF, 0x11]),
+    ];
+    for (dst, src, amount, expected) in cases {
+        let mut program = X86Program::new();
+        program.emit_rorx_reg_reg_imm8(dst, src, amount);
+        assert_eq!(program.code, expected, "dst={dst} src={src}");
+    }
+}
+
+#[test]
+fn two_register_imul_maps_extended_register_bits_by_modrm_direction() {
+    let cases = [
+        (3, 15, vec![0x49, 0x0F, 0xAF, 0xDF]),  // imul rbx, r15
+        (11, 7, vec![0x4C, 0x0F, 0xAF, 0xDF]),  // imul r11, rdi
+        (11, 15, vec![0x4D, 0x0F, 0xAF, 0xDF]), // imul r11, r15
+    ];
+    for (dst, src, expected) in cases {
+        let mut program = X86Program::new();
+        program.emit_binop_reg_reg_in_place(RuntimeBinOp::Mul, dst, src);
+        assert_eq!(program.code, expected, "dst={dst} src={src}");
+    }
+}
+
+#[test]
+fn indexed_bit_accumulation_preserves_cpu_safety_without_bmi2() {
+    let mut x = X86Program::with_options(X86BackendOptions {
+        target_features: TargetFeatureSet {
+            bmi2: false,
+            ..TargetFeatureSet::default()
+        },
+        ..X86BackendOptions::default()
+    });
+    x.emit_runtime_generic_program(&indexed_bit_accumulation_program());
+    let code = x.finalize();
+    assert!(
+        !code
+            .windows(5)
+            .any(|window| window[0] == 0xC4 && window[3] == 0xF7)
+    );
+    assert!(
+        code.windows(3).any(|window| window == [0x48, 0x0F, 0xA3]),
+        "expected scalar BT fallback"
+    );
+}
+
+#[test]
+fn boolean_accumulator_proof_follows_only_local_dominating_definitions() {
+    let program = RuntimeProgram {
+        slots: 4,
+        instrs: vec![
+            RuntimeInstr::Mov {
+                dst: 0,
+                src: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOp {
+                dst: 1,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Slot(2),
+            },
+            RuntimeInstr::Mov {
+                dst: 3,
+                src: RuntimeOperand::Slot(1),
+            },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(3),
+            },
+        ],
+    };
+    let incoming = vec![false; program.instrs.len()];
+    assert!(runtime_operand_is_boolean_before(
+        &program,
+        3,
+        RuntimeOperand::Slot(3),
+        &incoming,
+        0,
+    ));
+
+    let mut merged = incoming;
+    merged[2] = true;
+    assert!(!runtime_operand_is_boolean_before(
+        &program,
+        3,
+        RuntimeOperand::Slot(3),
+        &merged,
+        0,
+    ));
+}
+
+#[test]
 fn runtime_generic_dynamic_indexed_bit_test_preserves_modulo_bit_index() {
     let mut x = X86Program::new();
     let base_slots = vec![0usize, 1, 2, 3];
@@ -1783,161 +2218,224 @@ fn exact_unroll_emission_plan_preserves_ir_blocks_and_collapses_machine_guards()
 }
 
 #[test]
-fn runtime_generic_bloom_split_block_kernel_emits_direct_bit_test_path() {
-    let mut x = X86Program::new();
-    let filter_slots: Vec<usize> = (0..8usize).collect();
+fn counted_loop_emission_plan_uses_only_a_dead_control_induction() {
     let program = RuntimeProgram {
-        slots: 10,
+        slots: 2,
         instrs: vec![
             RuntimeInstr::Mov {
-                dst: 8,
-                src: RuntimeOperand::Imm(12345),
-            },
-            RuntimeInstr::BloomSplitBlockInsert {
-                filter_slots: filter_slots.clone(),
-                hash: RuntimeOperand::Slot(8),
-            },
-            RuntimeInstr::BloomSplitBlockCheck {
-                dst: 9,
-                filter_slots,
-                hash: RuntimeOperand::Slot(8),
-            },
-            RuntimeInstr::Exit {
-                code: RuntimeOperand::Slot(9),
-            },
-        ],
-    };
-    x.emit_runtime_generic_program(&program);
-    let code = x.finalize();
-    assert!(
-        code.windows(2).any(|w| w == [0x0F, 0xAB]),
-        "expected bts in bloom insert path"
-    );
-    assert!(
-        code.windows(2).any(|w| w == [0x0F, 0xA3]),
-        "expected bt in bloom check path"
-    );
-}
-
-#[test]
-fn runtime_generic_classic_bloom_check_emits_four_short_circuit_bit_tests() {
-    let mut x = X86Program::new();
-    let filter_slots: Vec<usize> = (0..64usize).collect();
-    let program = RuntimeProgram {
-        slots: 67,
-        instrs: vec![
-            RuntimeInstr::Mov {
-                dst: 64,
-                src: RuntimeOperand::Imm(0x1234_5678_9abc_def0),
-            },
-            RuntimeInstr::BloomClassic4Check {
-                dst: 65,
-                lanes_checked: 66,
-                filter_slots,
-                hash: RuntimeOperand::Slot(64),
-            },
-            RuntimeInstr::Exit {
-                code: RuntimeOperand::Slot(65),
-            },
-        ],
-    };
-    x.emit_runtime_generic_program(&program);
-    let code = x.finalize();
-    assert_eq!(
-        code.windows(4)
-            .filter(|window| *window == [0x48, 0x0F, 0xA3, 0xCA])
-            .count(),
-        4
-    );
-    assert_eq!(
-        code.windows(2)
-            .filter(|window| *window == [0x0F, 0x83])
-            .count(),
-        4
-    );
-}
-
-#[test]
-fn runtime_classic_bloom_result_branch_fuses_only_when_lane_state_is_dead() {
-    let filter_slots: Vec<usize> = (0..64usize).collect();
-    let mut program = RuntimeProgram {
-        slots: 67,
-        instrs: vec![
-            RuntimeInstr::BloomClassic4Check {
-                dst: 64,
-                lanes_checked: 65,
-                filter_slots,
-                hash: RuntimeOperand::Slot(66),
+                dst: 0,
+                src: RuntimeOperand::Imm(2),
             },
             RuntimeInstr::JumpIfCmpFalse {
-                op: RuntimeCmpOp::Eq,
-                lhs: RuntimeOperand::Slot(64),
-                rhs: RuntimeOperand::Imm(1),
-                target: 3,
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Imm(12),
+                target: 6,
             },
-            RuntimeInstr::Exit {
-                code: RuntimeOperand::Imm(0),
+            RuntimeInstr::BinOpInPlace {
+                dst: 1,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(7),
             },
+            RuntimeInstr::Jump { target: 4 },
+            RuntimeInstr::BinOpInPlace {
+                dst: 0,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(2),
+            },
+            RuntimeInstr::Jump { target: 1 },
             RuntimeInstr::Exit {
-                code: RuntimeOperand::Imm(1),
+                code: RuntimeOperand::Slot(1),
             },
         ],
     };
-    let incoming = vec![false; program.instrs.len()];
-    let fusion = runtime_bloom_classic4_jump_fusion_candidate(&program, 0, &incoming)
-        .expect("dead result state permits direct branch fusion");
-    assert_eq!(fusion.target, 3);
+    let plan = runtime_counted_loop_emission_plan(&program);
+    assert_eq!(plan.initializer_count[0], Some(5));
+    assert!(plan.suppress_instr[1]);
+    assert!(!plan.suppress_instr[3]);
+    assert!(plan.suppress_instr[4]);
+    assert_eq!(plan.latch[5], Some((0, 1)));
 
-    program.instrs.insert(
-        2,
+    let mut machine = X86Program::new();
+    machine.emit_runtime_generic_program(&program);
+    assert!(
+        machine.code.windows(2).any(|bytes| bytes == [0x0F, 0x85]),
+        "the latch must use the flags produced by a decrement"
+    );
+}
+
+#[test]
+fn counted_loop_emission_plan_rejects_observed_induction_and_side_entries() {
+    let mut observed = RuntimeProgram {
+        slots: 2,
+        instrs: vec![
+            RuntimeInstr::Mov {
+                dst: 0,
+                src: RuntimeOperand::Imm(0),
+            },
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Imm(8),
+                target: 5,
+            },
+            RuntimeInstr::Mov {
+                dst: 1,
+                src: RuntimeOperand::Slot(0),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: 0,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::Jump { target: 1 },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(1),
+            },
+        ],
+    };
+    let plan = runtime_counted_loop_emission_plan(&observed);
+    assert!(plan.initializer_count.iter().all(Option::is_none));
+
+    observed.instrs[2] = RuntimeInstr::Mov {
+        dst: 1,
+        src: RuntimeOperand::Imm(0),
+    };
+    observed.instrs.insert(
+        0,
+        RuntimeInstr::JumpIfZero {
+            cond_slot: 1,
+            target: 2,
+        },
+    );
+    let RuntimeInstr::JumpIfCmpFalse { target, .. } = &mut observed.instrs[2] else {
+        unreachable!();
+    };
+    *target = 6;
+    observed.instrs[5] = RuntimeInstr::Jump { target: 2 };
+    let plan = runtime_counted_loop_emission_plan(&observed);
+    assert!(plan.initializer_count.iter().all(Option::is_none));
+}
+
+#[test]
+fn counted_loop_emission_plan_rejects_wrapping_induction() {
+    let program = RuntimeProgram {
+        slots: 2,
+        instrs: vec![
+            RuntimeInstr::Mov {
+                dst: 0,
+                src: RuntimeOperand::Imm(u64::MAX - 3),
+            },
+            RuntimeInstr::JumpIfCmpFalse {
+                op: RuntimeCmpOp::LtUnsigned,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Imm(u64::MAX),
+                target: 5,
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: 1,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(1),
+            },
+            RuntimeInstr::BinOpInPlace {
+                dst: 0,
+                op: RuntimeBinOp::Add,
+                rhs: RuntimeOperand::Imm(4),
+            },
+            RuntimeInstr::Jump { target: 1 },
+            RuntimeInstr::Exit {
+                code: RuntimeOperand::Slot(1),
+            },
+        ],
+    };
+    let plan = runtime_counted_loop_emission_plan(&program);
+    assert!(plan.initializer_count.iter().all(Option::is_none));
+}
+
+#[test]
+fn affine_select_fusion_requires_dead_proof_temporaries() {
+    let canonical = vec![
+        RuntimeInstr::Cmp {
+            dst: 1,
+            op: RuntimeCmpOp::LtUnsigned,
+            lhs: RuntimeOperand::Slot(0),
+            rhs: RuntimeOperand::Imm(128),
+        },
+        RuntimeInstr::BinOp {
+            dst: 2,
+            op: RuntimeBinOp::Sub,
+            lhs: RuntimeOperand::Imm(0),
+            rhs: RuntimeOperand::Slot(1),
+        },
+        RuntimeInstr::BinOp {
+            dst: 3,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(2),
+            rhs: RuntimeOperand::Imm(5 ^ 9),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 3,
+            op: RuntimeBinOp::BitXor,
+            rhs: RuntimeOperand::Imm(9),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::Mul,
+            rhs: RuntimeOperand::Slot(3),
+        },
+        RuntimeInstr::BinOp {
+            dst: 3,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(2),
+            rhs: RuntimeOperand::Imm(7 ^ 11),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 3,
+            op: RuntimeBinOp::BitXor,
+            rhs: RuntimeOperand::Imm(11),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::Add,
+            rhs: RuntimeOperand::Slot(3),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::BitAnd,
+            rhs: RuntimeOperand::Imm(255),
+        },
+        RuntimeInstr::Exit {
+            code: RuntimeOperand::Slot(0),
+        },
+    ];
+    let program = RuntimeProgram {
+        slots: 4,
+        instrs: canonical.clone(),
+    };
+    let fusion =
+        runtime_affine_select_fusion_candidate(&program, 0, &vec![false; program.instrs.len()])
+            .expect("canonical target-neutral affine selection");
+    assert_eq!((fusion.then_mul, fusion.then_add), (5, 7));
+    assert_eq!(
+        (fusion.else_mul, fusion.else_add, fusion.mask),
+        (9, 11, 255)
+    );
+
+    let mut observed = canonical;
+    observed.insert(
+        9,
         RuntimeInstr::PrintInt {
-            value: RuntimeOperand::Slot(65),
+            value: RuntimeOperand::Slot(3),
             signed: false,
             bits: 64,
         },
     );
-    assert!(
-        runtime_bloom_classic4_jump_fusion_candidate(
-            &program,
-            0,
-            &vec![false; program.instrs.len()]
-        )
-        .is_none()
-    );
-}
-
-
-
-
-
-
-
-#[test]
-fn runtime_generic_hash_group_probe_kernel_emits_simd_match_scan() {
-    let mut x = X86Program::new();
-    let ctrl_slots: Vec<usize> = (0..16usize).collect();
-    let program = RuntimeProgram {
-        slots: 17,
-        instrs: vec![
-            RuntimeInstr::HashCtrlGroupProbe {
-                dst_mask: 16,
-                ctrl_slots,
-                group_start: RuntimeOperand::Imm(0),
-                fingerprint: RuntimeOperand::Imm(17),
-            },
-            RuntimeInstr::Exit {
-                code: RuntimeOperand::Slot(16),
-            },
-        ],
+    let observed = RuntimeProgram {
+        slots: 4,
+        instrs: observed,
     };
-    x.emit_runtime_generic_program(&program);
-    let code = x.finalize();
     assert!(
-        code.windows(3).any(|w| w == [0x66, 0x0F, 0x74]),
-        "expected pcmpeqb in grouped control-byte probe path"
-    );
-    assert!(
-        code.windows(3).any(|w| w == [0x66, 0x0F, 0xD7]),
-        "expected pmovmskb in grouped control-byte probe path"
+        runtime_affine_select_fusion_candidate(&observed, 0, &vec![false; observed.instrs.len()],)
+            .is_none()
     );
 }

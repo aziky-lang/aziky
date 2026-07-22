@@ -260,6 +260,15 @@ impl X86Program {
         } else {
             runtime_exact_unroll_emission_plan(program)
         };
+        let counted_loop_plan = if self.options.profile_instrument {
+            RuntimeCountedLoopEmissionPlan {
+                initializer_count: vec![None; program.instrs.len()],
+                suppress_instr: vec![false; program.instrs.len()],
+                latch: vec![None; program.instrs.len()],
+            }
+        } else {
+            runtime_counted_loop_emission_plan(program)
+        };
         let mut jump_patches: Vec<(usize, usize)> = Vec::new();
         let mut oob_exit_patches: Vec<usize> = Vec::new();
         let mut has_incoming_target = vec![false; program.instrs.len()];
@@ -301,8 +310,36 @@ impl X86Program {
                 }
             }
         }
+        let mut suppressed_instrs = vec![false; program.instrs.len()];
+        if self.options.target_features.bmi2 {
+            for candidate_index in 0..program.instrs.len() {
+                let Some(fusion) = runtime_bit_test_accumulate_fusion_candidate(
+                    program,
+                    candidate_index,
+                    &has_incoming_target,
+                ) else {
+                    continue;
+                };
+                for expression in [
+                    fusion.index_expression.as_ref(),
+                    fusion.bit_expression.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for instr in &expression.suppressed_instrs {
+                        suppressed_instrs[*instr] = true;
+                    }
+                }
+            }
+        }
         let mut idx = 0usize;
         while idx < program.instrs.len() {
+            if suppressed_instrs[idx] {
+                instr_offsets[idx] = self.code.len();
+                idx += 1;
+                continue;
+            }
             if hot_align_starts[idx] {
                 while self.code.len() % 16 != 0 {
                     self.code.push(0x90);
@@ -363,6 +400,49 @@ impl X86Program {
             if profile_block_at_start[idx].is_none() {
                 instr_offsets[idx] = self.code.len();
             }
+            if let Some(iterations) = counted_loop_plan.initializer_count[idx] {
+                let RuntimeInstr::Mov { dst, .. } = instr else {
+                    unreachable!("counted-loop initializer plan must target a move");
+                };
+                if let Some(reg) = slot_map.reg(*dst) {
+                    self.emit_mov_reg_imm64(reg, iterations);
+                } else {
+                    self.emit_mov_rax_imm(iterations);
+                    self.emit_store_rax_to_slot(*dst, &slot_map);
+                }
+                idx += 1;
+                continue;
+            }
+            if counted_loop_plan.suppress_instr[idx] {
+                idx += 1;
+                continue;
+            }
+            if let Some((counter, header)) = counted_loop_plan.latch[idx] {
+                if let Some(reg) = slot_map.reg(counter) {
+                    self.emit_dec_reg(reg);
+                } else if !self.emit_binop_slot_imm_in_place(
+                    counter,
+                    RuntimeBinOp::Sub,
+                    1,
+                    &slot_map,
+                ) {
+                    self.emit_load_slot_to_rax(counter, &slot_map);
+                    self.emit_alu_reg_imm(5, 0, 1_i32.to_le_bytes());
+                    self.emit_store_rax_to_slot(counter, &slot_map);
+                }
+                self.code.extend_from_slice(&[0x0F, 0x85]); // jnz rel32
+                let disp_pos = self.code.len();
+                self.code.extend_from_slice(&0_i32.to_le_bytes());
+                jump_patches.push((disp_pos, header));
+                idx += 1;
+                continue;
+            }
+            if matches!(instr, RuntimeInstr::Jump { target } if *target == idx + 1) {
+                // The successor is already the next emitted instruction. This
+                // remains valid even when the jump itself has predecessors.
+                idx += 1;
+                continue;
+            }
             if exact_unroll_plan.suppress_guard[idx] {
                 idx += 1;
                 continue;
@@ -384,6 +464,17 @@ impl X86Program {
                     }
                 }
                 idx += 1;
+                continue;
+            }
+
+            if let Some(fusion) =
+                runtime_affine_select_fusion_candidate(program, idx, &has_incoming_target)
+            {
+                for offset in 1..fusion.consumed {
+                    instr_offsets[idx + offset] = self.code.len();
+                }
+                self.emit_runtime_affine_select(&fusion, &slot_map);
+                idx += fusion.consumed;
                 continue;
             }
 
@@ -502,6 +593,128 @@ impl X86Program {
                     &mut oob_exit_patches,
                 ) {
                     idx += 2;
+                    continue;
+                }
+            }
+            if let Some(fusion) =
+                runtime_bit_test_accumulate_fusion_candidate(program, idx, &has_incoming_target)
+            {
+                instr_offsets[idx + 1] = self.code.len();
+                instr_offsets[idx + 2] = self.code.len();
+                instr_offsets[idx + 3] = self.code.len();
+                let accumulator_reg = match fusion.accumulator {
+                    RuntimeOperand::Slot(slot) => slot_map.reg(slot),
+                    RuntimeOperand::Imm(_) => None,
+                };
+                let destination_reg = slot_map.reg(fusion.dst);
+                let shift_dst_reg = if matches!(fusion.accumulator, RuntimeOperand::Imm(1)) {
+                    destination_reg.unwrap_or(0)
+                } else {
+                    0
+                };
+                let bmi2_shift = self.options.target_features.bmi2
+                    && self.emit_contiguous_stack_shrx_indexed(
+                        &fusion.base_slots,
+                        &fusion.index,
+                        &fusion.bit,
+                        fusion.index_expression.as_ref(),
+                        fusion.bit_expression.as_ref(),
+                        fusion.checked,
+                        shift_dst_reg,
+                        &slot_map,
+                        &mut oob_exit_patches,
+                    );
+                if bmi2_shift {
+                    let result_is_already_stored = match fusion.accumulator {
+                        RuntimeOperand::Imm(0) => {
+                            self.emit_xor_reg_reg(shift_dst_reg, shift_dst_reg);
+                            destination_reg == Some(shift_dst_reg)
+                        }
+                        RuntimeOperand::Imm(1) => {
+                            self.emit_and_reg_imm32(shift_dst_reg, 1);
+                            destination_reg == Some(shift_dst_reg)
+                        }
+                        RuntimeOperand::Imm(value) => {
+                            if !fusion.accumulator_is_boolean {
+                                self.emit_and_reg_imm32(shift_dst_reg, 1);
+                            }
+                            self.emit_mov_reg_imm64(1, value);
+                            self.emit_and_reg_reg(shift_dst_reg, 1);
+                            destination_reg == Some(shift_dst_reg)
+                        }
+                        RuntimeOperand::Slot(_) => {
+                            if !fusion.accumulator_is_boolean {
+                                self.emit_and_reg_imm32(shift_dst_reg, 1);
+                            }
+                            if destination_reg == accumulator_reg
+                                && destination_reg.is_some()
+                                && shift_dst_reg != destination_reg.expect("present")
+                            {
+                                self.emit_and_reg_reg(destination_reg.expect("present"), shift_dst_reg);
+                                true
+                            } else if let Some(reg) = accumulator_reg {
+                                self.emit_and_reg_reg(shift_dst_reg, reg);
+                                destination_reg == Some(shift_dst_reg)
+                            } else {
+                                self.emit_load_operand_to_reg(1, &fusion.accumulator, &slot_map);
+                                self.emit_and_reg_reg(shift_dst_reg, 1);
+                                destination_reg == Some(shift_dst_reg)
+                            }
+                        }
+                    };
+                    if !result_is_already_stored {
+                        if shift_dst_reg == 0 {
+                            self.emit_store_rax_to_slot(fusion.dst, &slot_map);
+                        } else if let Some(dst_reg) = destination_reg {
+                            self.emit_mov_reg_reg(dst_reg, shift_dst_reg);
+                        } else {
+                            self.emit_mov_reg_reg(0, shift_dst_reg);
+                            self.emit_store_rax_to_slot(fusion.dst, &slot_map);
+                        }
+                    }
+                    if let Some(copy) = fusion.suppressed_copy {
+                        suppressed_instrs[copy] = true;
+                    }
+                    idx += 4;
+                    continue;
+                }
+                let direct_bit_test = self.emit_contiguous_stack_bitop_indexed(
+                    &fusion.base_slots,
+                    &fusion.index,
+                    &fusion.bit,
+                    fusion.checked,
+                    true,
+                    0xA3, // bt r/m64, r64
+                    &slot_map,
+                    &mut oob_exit_patches,
+                );
+                let loaded_bit_test = if direct_bit_test {
+                    false
+                } else if self.emit_contiguous_stack_index_access(
+                    &fusion.base_slots,
+                    &fusion.index,
+                    &slot_map,
+                    0, // rax
+                    true,
+                    fusion.checked,
+                    &mut oob_exit_patches,
+                ) {
+                    self.emit_load_operand_to_reg(1, &fusion.bit, &slot_map); // rcx
+                    self.emit_bt_rax_rcx();
+                    true
+                } else {
+                    false
+                };
+                if direct_bit_test || loaded_bit_test {
+                    self.code.extend_from_slice(&[0x0F, 0x92, 0xC0]); // setb al (CF)
+                    self.code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+                    self.emit_load_operand_to_reg(1, &fusion.accumulator, &slot_map); // rcx
+                    self.emit_and_reg_reg(0, 1); // rax &= rcx
+                    self.emit_store_rax_to_slot(fusion.dst, &slot_map);
+                    if let Some(copy) = fusion.suppressed_copy {
+                        suppressed_instrs[copy] = true;
+                    }
+                    idx += 4;
                     continue;
                 }
             }
@@ -842,13 +1055,6 @@ impl X86Program {
                 } => {
                     self.emit_runtime_heap_copy(dst_ptr, src_ptr, bytes, &slot_map);
                 }
-                RuntimeInstr::BloomSplitBlockInsert { .. }
-                | RuntimeInstr::BloomSplitBlockCheck { .. }
-                | RuntimeInstr::BloomClassic4Check { .. }
-                | RuntimeInstr::HashCtrlGroupProbe { .. }
-                | RuntimeInstr::JoinSelectAdaptive { .. } => {
-                    unreachable!("removed benchmark-specific runtime instruction reached x86 emission")
-                }
                 RuntimeInstr::Alloc { dst, size } => {
                     if let Some(disp) = slot_map.promoted_alloc_disp(*dst) {
                         self.emit_lea_rax_rbp_disp(disp);
@@ -1106,6 +1312,38 @@ impl X86Program {
         self.code.extend_from_slice(&setcc);
         self.code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
         self.emit_store_rax_to_slot(dst, slot_map);
+    }
+
+    fn emit_runtime_affine_select(
+        &mut self,
+        fusion: &RuntimeAffineSelectFusion,
+        slot_map: &RuntimeSlotMap,
+    ) {
+        // MOV and CMOV preserve flags, so one compare selects both coefficient
+        // pairs before the single affine update.
+        self.emit_load_operand_to_rax(&fusion.cmp_lhs, slot_map);
+        self.emit_load_operand_to_rcx(&fusion.cmp_rhs, slot_map);
+        self.emit_cmp_reg_reg(0, 1);
+
+        self.emit_mov_rax_imm(fusion.else_mul);
+        self.emit_mov_rcx_imm(fusion.then_mul);
+        self.emit_cmovcc_reg_reg(0, 1, fusion.cmp_op);
+        self.emit_mov_rdx_imm(fusion.else_add);
+        self.emit_mov_rcx_imm(fusion.then_add);
+        self.emit_cmovcc_reg_reg(2, 1, fusion.cmp_op);
+
+        self.emit_load_slot_to_rcx(fusion.state_slot, slot_map);
+        self.emit_imul_reg_reg(1, 0);
+        self.emit_add_reg_reg(1, 2);
+        match fusion.mask {
+            u64::MAX => {}
+            mask if mask == u64::from(u32::MAX) => self.emit_mov_reg32_reg32(1, 1),
+            mask => {
+                self.emit_mov_rax_imm(mask);
+                self.emit_and_reg_reg(1, 0);
+            }
+        }
+        self.emit_store_reg_to_slot(1, fusion.state_slot, slot_map);
     }
 
     fn emit_jump_if_cmp_false(
@@ -2245,9 +2483,10 @@ impl X86Program {
             return;
         }
 
-        // Small-array hot path: dedicated fixed 64-lane branchless network without
-        // per-call CPU dispatch.
-        if slots.len() == 64 {
+        // For small power-of-two arrays, a branchless compare/swap network is
+        // cheaper than allocating and clearing radix histograms. This cutoff
+        // is a target cost decision independent of source shape.
+        if slots.len().is_power_of_two() && slots.len() <= 16 {
             self.emit_runtime_sort_network_power2_kernel(slots, signed, slot_map);
             return;
         }
@@ -2901,6 +3140,58 @@ impl X86Program {
         }
     }
 
+    fn emit_movzx_reg32_reg8(&mut self, dst: u8, src: u8) {
+        let mut rex = 0x40u8;
+        if dst >= 8 {
+            rex |= 0x04;
+        }
+        if src >= 8 {
+            rex |= 0x01;
+        }
+        // A REX prefix is also required to name SPL/BPL/SIL/DIL instead of
+        // the legacy high-byte registers AH/CH/DH/BH.
+        if rex != 0x40 || (src & 0x07) >= 4 {
+            self.code.push(rex);
+        }
+        self.code.extend_from_slice(&[0x0F, 0xB6]);
+        self.code
+            .push(0xC0 | ((dst & 0x07) << 3) | (src & 0x07));
+    }
+
+    fn emit_movzx_reg32_reg16(&mut self, dst: u8, src: u8) {
+        let mut rex = 0x40u8;
+        if dst >= 8 {
+            rex |= 0x04;
+        }
+        if src >= 8 {
+            rex |= 0x01;
+        }
+        if rex != 0x40 {
+            self.code.push(rex);
+        }
+        self.code.extend_from_slice(&[0x0F, 0xB7]);
+        self.code
+            .push(0xC0 | ((dst & 0x07) << 3) | (src & 0x07));
+    }
+
+    fn emit_mask_unsigned_low_bits(&mut self, reg: u8, mask: u32) {
+        self.emit_mask_unsigned_low_bits_from_reg(reg, reg, mask);
+    }
+
+    fn emit_mask_unsigned_low_bits_from_reg(&mut self, dst: u8, src: u8, mask: u32) {
+        match mask {
+            0xFF => self.emit_movzx_reg32_reg8(dst, src),
+            0xFFFF => self.emit_movzx_reg32_reg16(dst, src),
+            0xFFFF_FFFF => self.emit_mov_reg32_reg32(dst, src),
+            _ => {
+                if dst != src {
+                    self.emit_mov_reg_reg(dst, src);
+                }
+                self.emit_and_reg_imm32(dst, mask);
+            }
+        }
+    }
+
     fn emit_load_slot_to_rcx(&mut self, slot: usize, slot_map: &RuntimeSlotMap) {
         if let Some(reg) = slot_map.reg(slot) {
             self.emit_mov_reg_reg(1, reg); // rcx <- reg
@@ -3544,6 +3835,159 @@ impl X86Program {
             self.code.push(sib);
             self.code.extend_from_slice(&base_disp.to_le_bytes());
         }
+    }
+
+    fn emit_shrx_indexed_rbp_mem(
+        &mut self,
+        dst_reg: u8,
+        count_reg: u8,
+        index_reg: u8,
+        base_disp: i32,
+    ) {
+        // SHRX r64, r/m64, r64: VEX.NDS.LZ.F2.0F38.W1 F7 /r.
+        // The VEX.vvvv operand is the shift count and the SIB index addresses
+        // the fixed-array backing storage.
+        self.code.push(0xC4);
+        let vex2 = (if dst_reg < 8 { 0x80 } else { 0 })
+            | (if index_reg < 8 { 0x40 } else { 0 })
+            | 0x20 // inverted B for the RBP base
+            | 0x02; // 0F38 map
+        self.code.push(vex2);
+        let vex3 = 0x80 | (((!count_reg) & 0x0F) << 3) | 0x03; // W=1, F2 prefix
+        self.code.push(vex3);
+        self.code.push(0xF7);
+        let sib = 0xC0 | ((index_reg & 0x07) << 3) | 0x05; // scale=8, base=RBP
+        if i8::try_from(base_disp).is_ok() {
+            self.code.push(0x44 | ((dst_reg & 0x07) << 3));
+            self.code.push(sib);
+            self.code.push(base_disp as i8 as u8);
+        } else {
+            self.code.push(0x84 | ((dst_reg & 0x07) << 3));
+            self.code.push(sib);
+            self.code.extend_from_slice(&base_disp.to_le_bytes());
+        }
+    }
+
+    fn emit_rorx_reg_reg_imm8(&mut self, dst_reg: u8, src_reg: u8, amount: u8) {
+        // RORX r64, r/m64, imm8: VEX.LZ.F2.0F3A.W1 F0 /r ib.
+        // It leaves the source intact, so a proven low-field extraction does
+        // not need a preparatory copy. The caller proves rotated-in high bits
+        // cannot enter the demanded low field.
+        self.code.push(0xC4);
+        let vex2 = (if dst_reg < 8 { 0x80 } else { 0 })
+            | 0x40 // inverted X; no index register
+            | (if src_reg < 8 { 0x20 } else { 0 })
+            | 0x03; // 0F3A map
+        self.code.push(vex2);
+        self.code.push(0xFB); // W=1, vvvv=1111, L=0, F2 prefix
+        self.code.push(0xF0);
+        self.code
+            .push(0xC0 | ((dst_reg & 0x07) << 3) | (src_reg & 0x07));
+        self.code.push(amount);
+    }
+
+    fn emit_contiguous_stack_shrx_indexed(
+        &mut self,
+        base_slots: &[usize],
+        index: &RuntimeOperand,
+        bit: &RuntimeOperand,
+        index_expression: Option<&RuntimeMaskedShiftExpression>,
+        bit_expression: Option<&RuntimeMaskedShiftExpression>,
+        checked: bool,
+        dst_reg: u8,
+        slot_map: &RuntimeSlotMap,
+        oob_exit_patches: &mut Vec<usize>,
+    ) -> bool {
+        let Some((base_disp, needs_neg, width)) =
+            self.contiguous_stack_base_access(base_slots, slot_map)
+        else {
+            return false;
+        };
+        if width != 8 {
+            return false;
+        }
+        let direct_index_reg = if index_expression.is_none() && !checked && !needs_neg {
+            match index {
+                RuntimeOperand::Slot(slot) => slot_map.reg(*slot),
+                RuntimeOperand::Imm(_) => None,
+            }
+        } else {
+            None
+        };
+        let index_reg = direct_index_reg.unwrap_or(1);
+        if let Some(expression) = index_expression {
+            let mask = expression.mask as u32;
+            let field_bits = mask.count_ones();
+            let source_reg = match expression.base {
+                RuntimeOperand::Slot(slot) => slot_map.reg(slot),
+                RuntimeOperand::Imm(_) => None,
+            };
+            if let Some(source_reg) = source_reg
+                && u32::from(expression.shift) + field_bits <= 64
+            {
+                if expression.shift == 0 {
+                    self.emit_mask_unsigned_low_bits_from_reg(index_reg, source_reg, mask);
+                } else {
+                    self.emit_rorx_reg_reg_imm8(index_reg, source_reg, expression.shift);
+                    self.emit_mask_unsigned_low_bits(index_reg, mask);
+                }
+            } else {
+                self.emit_load_operand_to_reg(index_reg, &expression.base, slot_map);
+                if expression.shift != 0 {
+                    self.emit_shr_reg_imm8(index_reg, expression.shift);
+                }
+                self.emit_mask_unsigned_low_bits(index_reg, mask);
+            }
+        } else if direct_index_reg.is_none() {
+            self.emit_load_operand_to_reg(index_reg, index, slot_map);
+        }
+        if checked {
+            debug_assert_eq!(index_reg, 1);
+            self.code.extend_from_slice(&[0x48, 0x81, 0xF9]); // cmp rcx, imm32
+            self.code
+                .extend_from_slice(&(base_slots.len() as u32).to_le_bytes());
+            self.code.extend_from_slice(&[0x0F, 0x83]); // jae rel32
+            let pos = self.code.len();
+            self.code.extend_from_slice(&0_i32.to_le_bytes());
+            oob_exit_patches.push(pos);
+        }
+        if needs_neg {
+            self.emit_neg_reg(index_reg);
+        }
+        let direct_count_reg = if bit_expression.is_none() {
+            match bit {
+                RuntimeOperand::Slot(slot) => slot_map.reg(*slot),
+                RuntimeOperand::Imm(_) => None,
+            }
+        } else {
+            None
+        };
+        let count_reg = direct_count_reg.unwrap_or(2);
+        if let Some(expression) = bit_expression {
+            let source_reg = match expression.base {
+                RuntimeOperand::Slot(slot) => slot_map.reg(slot),
+                RuntimeOperand::Imm(_) => None,
+            };
+            if let Some(source_reg) = source_reg
+                && u32::from(expression.shift) + 6 <= 64
+            {
+                if expression.shift == 0 {
+                    self.emit_mov_reg_reg(count_reg, source_reg);
+                } else {
+                    self.emit_rorx_reg_reg_imm8(count_reg, source_reg, expression.shift);
+                }
+            } else {
+                self.emit_load_operand_to_reg(count_reg, &expression.base, slot_map);
+                if expression.shift != 0 {
+                    self.emit_shr_reg_imm8(count_reg, expression.shift);
+                }
+            }
+            // SHRX masks the count modulo 64, exactly matching `& 63`.
+        } else if direct_count_reg.is_none() {
+            self.emit_load_operand_to_reg(count_reg, bit, slot_map);
+        }
+        self.emit_shrx_indexed_rbp_mem(dst_reg, count_reg, index_reg, base_disp);
+        true
     }
 
     fn emit_contiguous_stack_bitop_indexed(
@@ -4437,10 +4881,19 @@ impl X86Program {
 
     fn emit_binop_reg_reg_in_place(&mut self, op: RuntimeBinOp, dst_reg: u8, src_reg: u8) {
         let mut rex = 0x48u8; // REX.W
-        if src_reg >= 8 {
+        // ADD/SUB/AND/OR/XOR encode src in ModRM.reg and dst in ModRM.r/m.
+        // Two-operand IMUL is the opposite: dst is ModRM.reg and src is
+        // ModRM.r/m. REX.R/REX.B must follow the encoded fields, not the
+        // source-language operand roles.
+        let (reg_field, rm_field) = if op == RuntimeBinOp::Mul {
+            (dst_reg, src_reg)
+        } else {
+            (src_reg, dst_reg)
+        };
+        if reg_field >= 8 {
             rex |= 0x04; // REX.R
         }
-        if dst_reg >= 8 {
+        if rm_field >= 8 {
             rex |= 0x01; // REX.B
         }
         self.code.push(rex);
@@ -4510,6 +4963,15 @@ impl X86Program {
         self.code.push(0xC0 | ((src_reg & 0x7) << 3) | (dst_reg & 0x7));
     }
 
+    fn emit_and_reg_reg(&mut self, dst_reg: u8, src_reg: u8) {
+        let mut rex = 0x48u8; // REX.W
+        if src_reg >= 8 { rex |= 0x04; } // REX.R
+        if dst_reg >= 8 { rex |= 0x01; } // REX.B
+        self.code.push(rex);
+        self.code.push(0x21); // and r/m64, r64
+        self.code.push(0xC0 | ((src_reg & 0x7) << 3) | (dst_reg & 0x7));
+    }
+
     fn emit_sub_reg_reg(&mut self, dst_reg: u8, src_reg: u8) {
         let mut rex = 0x48u8; // REX.W
         if src_reg >= 8 { rex |= 0x04; }
@@ -4544,6 +5006,31 @@ impl X86Program {
         self.code.push(rex);
         self.code.push(0x0F);
         self.code.push(0x42); // cmovb r64, r/m64
+        self.code
+            .push(0xC0 | ((dst_reg & 0x7) << 3) | (src_reg & 0x7));
+    }
+
+    fn emit_cmovcc_reg_reg(&mut self, dst_reg: u8, src_reg: u8, op: RuntimeCmpOp) {
+        let mut rex = 0x48u8; // REX.W
+        if dst_reg >= 8 {
+            rex |= 0x04; // REX.R
+        }
+        if src_reg >= 8 {
+            rex |= 0x01; // REX.B
+        }
+        let opcode = match op {
+            RuntimeCmpOp::Eq => 0x44,
+            RuntimeCmpOp::Ne => 0x45,
+            RuntimeCmpOp::LtUnsigned => 0x42,
+            RuntimeCmpOp::LeUnsigned => 0x46,
+            RuntimeCmpOp::GtUnsigned => 0x47,
+            RuntimeCmpOp::GeUnsigned => 0x43,
+            RuntimeCmpOp::LtSigned => 0x4C,
+            RuntimeCmpOp::LeSigned => 0x4E,
+            RuntimeCmpOp::GtSigned => 0x4F,
+            RuntimeCmpOp::GeSigned => 0x4D,
+        };
+        self.code.extend_from_slice(&[rex, 0x0F, opcode]);
         self.code
             .push(0xC0 | ((dst_reg & 0x7) << 3) | (src_reg & 0x7));
     }

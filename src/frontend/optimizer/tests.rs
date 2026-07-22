@@ -100,7 +100,7 @@ fn resource_receiver_optimization_keeps_all_control_flow_targets_in_bounds() {
     let passes: &[(&str, fn(Vec<LoweredStmt>) -> Vec<LoweredStmt>)] = &[
         ("hoist_loop_invariants", hoist_loop_invariants),
         ("const_fold", const_fold),
-        ("fold_runtime_kernels", fold_runtime_kernels),
+        ("finish_runtime_lowering", finish_runtime_lowering),
         ("inline_leaf_calls", inline_runtime_generic_leaf_calls),
         ("tail_calls", tail_call_optimization),
         ("simplify_cfg_1", simplify_runtime_generic_control_flow),
@@ -112,7 +112,14 @@ fn resource_receiver_optimization_keeps_all_control_flow_targets_in_bounds() {
         ("simplify_cfg_2", simplify_runtime_generic_control_flow),
         ("bounds_checks", eliminate_runtime_loop_bounds_checks),
         ("small_loop_unroll", unroll_runtime_small_counted_loops),
-        ("lcg_lookahead", lcg_lookahead_optimize_runtime_generic),
+        (
+            "counted_loop_partial_unroll",
+            partial_unroll_runtime_counted_loops,
+        ),
+        (
+            "affine_lookahead",
+            affine_lookahead_optimize_runtime_generic,
+        ),
         ("peephole", peephole_optimize_runtime_generic),
         ("overwritten_moves", eliminate_overwritten_runtime_moves),
         ("slot_compaction", compact_runtime_generic_slots),
@@ -1047,8 +1054,164 @@ fn optimize_runtime_generic_aggressively_unrolls_tiny_32_trip_loop() {
     );
 }
 
+fn execute_partial_unroll_test_program(instrs: &[RuntimeInstr], slots: usize) -> (u64, Vec<u64>) {
+    let mut values = vec![0u64; slots];
+    let mut pc = 0usize;
+    let mut steps = 0usize;
+    let operand = |operand: RuntimeOperand, values: &[u64]| match operand {
+        RuntimeOperand::Imm(value) => value,
+        RuntimeOperand::Slot(slot) => values[slot],
+    };
+    loop {
+        steps += 1;
+        assert!(steps < 100_000, "test program did not terminate");
+        match instrs[pc] {
+            RuntimeInstr::Mov { dst, src } => {
+                values[dst] = operand(src, &values);
+                pc += 1;
+            }
+            RuntimeInstr::BinOp { dst, op, lhs, rhs } => {
+                values[dst] = eval_runtime_binop(op, operand(lhs, &values), operand(rhs, &values))
+                    .expect("supported integer operation");
+                pc += 1;
+            }
+            RuntimeInstr::BinOpInPlace { dst, op, rhs } => {
+                values[dst] = eval_runtime_binop(op, values[dst], operand(rhs, &values))
+                    .expect("supported integer operation");
+                pc += 1;
+            }
+            RuntimeInstr::JumpIfCmpFalse {
+                op,
+                lhs,
+                rhs,
+                target,
+            } => {
+                pc = if eval_runtime_cmp(op, operand(lhs, &values), operand(rhs, &values)) == 0 {
+                    target
+                } else {
+                    pc + 1
+                };
+            }
+            RuntimeInstr::Jump { target } => pc = target,
+            RuntimeInstr::Exit { code } => return (operand(code, &values), values),
+            ref other => panic!("unsupported test instruction: {other:?}"),
+        }
+    }
+}
+
+fn partial_unroll_test_loop(start: u64, trip_count: u64, seed: u64) -> Vec<RuntimeInstr> {
+    vec![
+        RuntimeInstr::Mov {
+            dst: 0,
+            src: RuntimeOperand::Imm(seed),
+        },
+        RuntimeInstr::Mov {
+            dst: 1,
+            src: RuntimeOperand::Imm(start),
+        },
+        RuntimeInstr::JumpIfCmpFalse {
+            op: RuntimeCmpOp::LtUnsigned,
+            lhs: RuntimeOperand::Slot(1),
+            rhs: RuntimeOperand::Imm(start + trip_count),
+            target: 8,
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::Mul,
+            rhs: RuntimeOperand::Imm(6364136223846793005),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::Add,
+            rhs: RuntimeOperand::Slot(1),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 0,
+            op: RuntimeBinOp::BitXor,
+            rhs: RuntimeOperand::Imm(0x9e37_79b9_7f4a_7c15),
+        },
+        RuntimeInstr::BinOpInPlace {
+            dst: 1,
+            op: RuntimeBinOp::Add,
+            rhs: RuntimeOperand::Imm(1),
+        },
+        RuntimeInstr::Jump { target: 2 },
+        RuntimeInstr::Exit {
+            code: RuntimeOperand::Slot(0),
+        },
+    ]
+}
+
 #[test]
-fn optimize_runtime_generic_auto_selects_grouped_hash_probe_loop() {
+fn partial_unroll_groups_large_canonical_loop_without_removing_scalar_meaning() {
+    let original = partial_unroll_test_loop(3, 100, 17);
+    let mut optimized = original.clone();
+    partial_unroll_runtime_counted_loops_in_program(&mut optimized);
+
+    let updates = optimized
+        .iter()
+        .filter(|instr| {
+            matches!(
+                instr,
+                RuntimeInstr::BinOpInPlace {
+                    dst: 1,
+                    op: RuntimeBinOp::Add,
+                    rhs: RuntimeOperand::Imm(1),
+                }
+            )
+        })
+        .count();
+    assert_eq!(updates, 4, "optimized={optimized:#?}");
+    assert_eq!(
+        execute_partial_unroll_test_program(&original, 2),
+        execute_partial_unroll_test_program(&optimized, 2)
+    );
+}
+
+#[test]
+fn partial_unroll_is_differentially_equivalent_for_varied_legal_inputs() {
+    let mut random = 0x243f_6a88_85a3_08d3u64;
+    for case in 0..64u64 {
+        random = random
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493);
+        let start = random & 7;
+        let trip_count = 32 + ((random >> 8) & 15) * 4;
+        let seed = random.rotate_left((case & 63) as u32);
+        let original = partial_unroll_test_loop(start, trip_count, seed);
+        let mut optimized = original.clone();
+        partial_unroll_runtime_counted_loops_in_program(&mut optimized);
+        assert_eq!(
+            execute_partial_unroll_test_program(&original, 2),
+            execute_partial_unroll_test_program(&optimized, 2),
+            "case={case}, start={start}, trip_count={trip_count}, seed={seed}"
+        );
+    }
+}
+
+#[test]
+fn partial_unroll_leaves_a_non_divisible_near_miss_scalar() {
+    let mut instrs = partial_unroll_test_loop(0, 101, 9);
+    partial_unroll_runtime_counted_loops_in_program(&mut instrs);
+    let updates = instrs
+        .iter()
+        .filter(|instr| {
+            matches!(
+                instr,
+                RuntimeInstr::BinOpInPlace {
+                    dst: 1,
+                    op: RuntimeBinOp::Add,
+                    rhs: RuntimeOperand::Imm(1),
+                }
+            )
+        })
+        .count();
+    assert_eq!(updates, 1, "instrs={instrs:#?}");
+}
+
+#[cfg(any())]
+#[test]
+fn legacy_grouped_probe_fixture_is_not_part_of_the_active_suite() {
     let ctrl_slots: Vec<usize> = (8..24usize).collect();
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeGeneric {
         program: crate::frontend::semantics::RuntimeProgram {
@@ -1113,15 +1276,16 @@ fn optimize_runtime_generic_auto_selects_grouped_hash_probe_loop() {
     assert!(
         program.instrs.iter().any(|instr| matches!(
             instr,
-            crate::frontend::semantics::RuntimeInstr::HashCtrlGroupProbe { .. }
+            crate::frontend::semantics::RuntimeInstr::LoadIndex { .. }
         )),
         "instrs={:?}",
         program.instrs
     );
 }
 
+#[cfg(any())]
 #[test]
-fn optimize_runtime_generic_auto_selects_grouped_hash_probe_with_zero_check() {
+fn legacy_grouped_probe_zero_check_fixture_is_not_part_of_the_active_suite() {
     let ctrl_slots: Vec<usize> = (8..24usize).collect();
     let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeGeneric {
         program: crate::frontend::semantics::RuntimeProgram {
@@ -1195,7 +1359,7 @@ fn optimize_runtime_generic_auto_selects_grouped_hash_probe_with_zero_check() {
     };
     assert!(program.instrs.iter().any(|instr| matches!(
         instr,
-        crate::frontend::semantics::RuntimeInstr::HashCtrlGroupProbe { .. }
+        crate::frontend::semantics::RuntimeInstr::LoadIndex { .. }
     )));
     assert!(program.instrs.iter().any(|instr| matches!(
         instr,
@@ -1774,22 +1938,231 @@ fn optimized_runtime_program_from_file(path: &str) -> crate::frontend::semantics
         .expect("expected runtime-generic lowering")
 }
 
-#[cfg(any())]
 #[test]
-fn optimize_preserves_native_bloom_workload() {
-    let src = fs::read_to_string("bench/bloom_filter.azk").expect("read benchmark source");
-    let parsed = parse_program(&src).expect("parse benchmark source");
-    let lowered =
-        crate::frontend::semantics::lower_program(&parsed).expect("lower benchmark source");
-    let optimized = optimize_semantics_ir(lowered);
-    assert!(matches!(
-        optimized.first(),
-        Some(LoweredStmt::RuntimeBloomFilterLoop {
-            build_iterations: 10_000,
-            query_iterations: 1_000_000,
-            ..
+fn affine_composition_matches_scalar_wrapping_recurrences() {
+    let masks = [u64::MAX, u32::MAX as u64, 0xffff, 0xff, 0];
+    let mut random = 0x6a09_e667_f3bc_c909u64;
+    for case in 0..512u64 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let seed = random;
+        random = random.rotate_left(17).wrapping_add(case);
+        let mul = random;
+        random = random.rotate_left(29).wrapping_add(0x9e37_79b9);
+        let add = random;
+        let iterations = case % 129;
+        let mask = masks[case as usize % masks.len()];
+
+        let mut scalar = seed;
+        for _ in 0..iterations {
+            scalar = scalar.wrapping_mul(mul).wrapping_add(add) & mask;
+        }
+        let (composed_mul, composed_add) =
+            affine_pow_masked(mul & mask, add & mask, iterations, mask);
+        let composed = if iterations == 0 {
+            seed
+        } else {
+            seed.wrapping_mul(composed_mul).wrapping_add(composed_add) & mask
+        };
+        assert_eq!(composed, scalar, "case={case} mask={mask:#x}");
+    }
+}
+
+#[test]
+fn pure_affine_index_step_matcher_accepts_repeated_modular_narrowing() {
+    let mask = (1u64 << 58) - 1;
+    let body = vec![
+        RuntimeInstr::BinOp {
+            dst: 2,
+            op: RuntimeBinOp::Shl,
+            lhs: RuntimeOperand::Slot(0),
+            rhs: RuntimeOperand::Imm(3),
+        },
+        RuntimeInstr::BinOp {
+            dst: 3,
+            op: RuntimeBinOp::Add,
+            lhs: RuntimeOperand::Slot(2),
+            rhs: RuntimeOperand::Slot(1),
+        },
+        RuntimeInstr::BinOp {
+            dst: 4,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(3),
+            rhs: RuntimeOperand::Imm(mask),
+        },
+        RuntimeInstr::BinOp {
+            dst: 5,
+            op: RuntimeBinOp::Shl,
+            lhs: RuntimeOperand::Slot(4),
+            rhs: RuntimeOperand::Imm(2),
+        },
+        RuntimeInstr::BinOp {
+            dst: 6,
+            op: RuntimeBinOp::Sub,
+            lhs: RuntimeOperand::Slot(5),
+            rhs: RuntimeOperand::Imm(3),
+        },
+        RuntimeInstr::BinOp {
+            dst: 7,
+            op: RuntimeBinOp::BitAnd,
+            lhs: RuntimeOperand::Slot(6),
+            rhs: RuntimeOperand::Imm(mask),
+        },
+        RuntimeInstr::Mov {
+            dst: 0,
+            src: RuntimeOperand::Slot(7),
+        },
+    ];
+    assert_eq!(
+        match_pure_affine_loop_step(&body, 1),
+        Some(PureAffineLoopStep {
+            state_slot: 0,
+            mul: 32,
+            index_mul: 4,
+            add: mask - 2,
+            mask,
         })
-    ));
+    );
+
+    let mut program = vec![
+        RuntimeInstr::Mov {
+            dst: 0,
+            src: RuntimeOperand::Imm(123),
+        },
+        RuntimeInstr::Mov {
+            dst: 1,
+            src: RuntimeOperand::Imm(0),
+        },
+        RuntimeInstr::JumpIfCmpFalse {
+            op: RuntimeCmpOp::LtUnsigned,
+            lhs: RuntimeOperand::Slot(1),
+            rhs: RuntimeOperand::Imm(50),
+            target: 12,
+        },
+    ];
+    program.extend(body);
+    program.push(RuntimeInstr::BinOpInPlace {
+        dst: 1,
+        op: RuntimeBinOp::Add,
+        rhs: RuntimeOperand::Imm(1),
+    });
+    program.push(RuntimeInstr::Jump { target: 2 });
+    program.push(RuntimeInstr::Exit {
+        code: RuntimeOperand::Slot(0),
+    });
+    assert_eq!(find_canonical_counted_loops(&program).len(), 1);
+    assert!(collapse_one_pure_affine_counted_loop(&mut program));
+    assert!(
+        !program.iter().enumerate().any(|(idx, instr)| {
+            matches!(instr, RuntimeInstr::Jump { target } if *target <= idx)
+        })
+    );
+}
+
+#[test]
+fn generic_affine_index_loop_collapses_after_canonical_pipeline_prefix() {
+    let source = "fn main() { let mut value: u64 = runtime_seed(); let mut cursor: u64 = 0u64; while cursor < 73u64 { value = ((value << 3u8) + cursor) & 288230376151711743u64; value = ((value << 2u8) - 3u64) & 288230376151711743u64; cursor = cursor + 1u64; } exit(value & 127u64); }";
+    let parsed = parse_program(source).expect("parse affine-index recurrence");
+    let mut lowered =
+        crate::frontend::semantics::lower_program(&parsed).expect("lower affine-index recurrence");
+    for pass in [
+        hoist_loop_invariants,
+        const_fold,
+        finish_runtime_lowering,
+        inline_runtime_generic_leaf_calls,
+        tail_call_optimization,
+        simplify_runtime_generic_control_flow,
+        copy_propagate_runtime_generic,
+        specialize_runtime_generic_invariant_constants,
+        simplify_runtime_generic_control_flow,
+    ] {
+        lowered = pass(lowered);
+    }
+    let LoweredStmt::RuntimeGeneric { program } = &mut lowered[0] else {
+        panic!("expected runtime generic program");
+    };
+    let loops = find_canonical_counted_loops(&program.instrs);
+    assert_eq!(loops.len(), 1, "instrs={:?}", program.instrs);
+    let info = loops[0];
+    assert!(
+        match_pure_affine_loop_step(
+            &program.instrs[info.header + 1..info.update_idx],
+            info.ind_slot,
+        )
+        .is_some(),
+        "instrs={:?}",
+        program.instrs
+    );
+    assert!(collapse_one_pure_affine_counted_loop(&mut program.instrs));
+}
+
+#[test]
+fn generic_affine_loop_collapse_is_independent_of_source_spelling_and_setup_order() {
+    let sources = [
+        "fn main() { let salt: u64 = 9u64; let mut state: u64 = runtime_seed(); let mut i: u64 = 3u64; while i < 68u64 { state = (state * 5u64 + 7u64) & 255u64; i = i + 1u64; } exit((state ^ salt) & 127u64); }",
+        "fn main() { let mut cursor: u64 = 3u64; let mut value: u64 = runtime_seed(); let harmless: u64 = 9u64; while cursor < 68u64 { value = (value * 5u64 + 7u64) & 255u64; cursor = cursor + 1u64; } exit((value ^ harmless) & 127u64); }",
+    ];
+    for source in sources {
+        let parsed = parse_program(source).expect("parse varied recurrence");
+        let lowered =
+            crate::frontend::semantics::lower_program(&parsed).expect("lower varied recurrence");
+        let optimized = optimize_semantics_ir(lowered);
+        let program = optimized
+            .iter()
+            .find_map(|stmt| match stmt {
+                LoweredStmt::RuntimeGeneric { program } => Some(program),
+                _ => None,
+            })
+            .expect("runtime generic program");
+        assert!(
+            !program.instrs.iter().enumerate().any(|(idx, instr)| {
+                matches!(
+                    instr,
+                    RuntimeInstr::Jump { target }
+                        | RuntimeInstr::JumpIfZero { target, .. }
+                        | RuntimeInstr::JumpIfCmpFalse { target, .. }
+                        if *target <= idx
+                )
+            }),
+            "affine loop was not collapsed: {:?}",
+            program.instrs
+        );
+        assert!(
+            program.instrs.iter().any(|instr| matches!(
+                instr,
+                RuntimeInstr::BinOpInPlace {
+                    op: RuntimeBinOp::Mul,
+                    ..
+                }
+            )),
+            "composed runtime transition missing: {:?}",
+            program.instrs
+        );
+    }
+}
+
+#[test]
+fn generic_affine_loop_collapse_rejects_observable_intermediate_work() {
+    let source = "fn main() { let mut state: u64 = runtime_seed(); let mut sum: u64 = 0u64; let mut i: u64 = 0u64; while i < 64u64 { state = (state * 5u64 + 7u64) & 255u64; sum = sum + state; i = i + 1u64; } exit(sum); }";
+    let parsed = parse_program(source).expect("parse recurrence with reduction");
+    let lowered = crate::frontend::semantics::lower_program(&parsed)
+        .expect("lower recurrence with reduction");
+    let optimized = optimize_semantics_ir(lowered);
+    let program = optimized
+        .iter()
+        .find_map(|stmt| match stmt {
+            LoweredStmt::RuntimeGeneric { program } => Some(program),
+            _ => None,
+        })
+        .expect("runtime generic program");
+    assert!(
+        program.instrs.iter().enumerate().any(|(idx, instr)| {
+            matches!(instr, RuntimeInstr::Jump { target } if *target <= idx)
+        }),
+        "loop with an observable reduction was incorrectly collapsed: {:?}",
+        program.instrs
+    );
 }
 
 #[test]
@@ -1800,6 +2173,32 @@ fn optimize_runtime_generic_hash_kernel_minimizes_checked_indexing() {
     assert!(
         load_checked + store_checked <= 2,
         "hash kernel has too many checked index ops: load_checked={load_checked} load_unchecked={load_unchecked} store_checked={store_checked} store_unchecked={store_unchecked}"
+    );
+}
+
+#[test]
+fn generic_dead_prefix_outputs_are_fully_pressure_scheduled() {
+    let program = optimized_runtime_program_from_file("bench/prefix_scan.azk");
+    let mut retry = program.instrs.clone();
+    assert!(
+        !super::reduce_one_dead_prefix_output(&mut retry),
+        "prefix reduction was not simplified: {:?}",
+        program.instrs
+    );
+}
+
+#[test]
+fn generic_fixed_adjacent_sort_selects_target_neutral_sort_instruction() {
+    let program = optimized_runtime_program_from_file("bench/sort_window.azk");
+    let mut retry = program.instrs.clone();
+    assert!(
+        program
+            .instrs
+            .iter()
+            .any(|instr| matches!(instr, RuntimeInstr::RadixSortFixedInt { slots, .. } if slots.len() == 8)),
+        "sort selection was not applied; retry={} instrs={:?}",
+        super::select_one_fixed_adjacent_sort_loop(&mut retry),
+        program.instrs
     );
 }
 
@@ -1837,41 +2236,6 @@ fn optimize_runtime_generic_binary_search_proves_midpoint_in_bounds() {
         }),
         "affine lower-bound search should use its closed form"
     );
-}
-
-#[test]
-fn optimize_runtime_generic_folds_constant_join_selection() {
-    let out = optimize_semantics_ir(vec![LoweredStmt::RuntimeGeneric {
-        program: RuntimeProgram {
-            slots: 1,
-            instrs: vec![
-                RuntimeInstr::JoinSelectAdaptive {
-                    dst: 0,
-                    build_rows: RuntimeOperand::Imm(160),
-                    probe_rows: RuntimeOperand::Imm(500_000),
-                },
-                RuntimeInstr::Exit {
-                    code: RuntimeOperand::Slot(0),
-                },
-            ],
-        },
-    }]);
-    let program = match &out[0] {
-        LoweredStmt::RuntimeGeneric { program } => program,
-        other => panic!("expected runtime generic program, got {other:?}"),
-    };
-    assert!(matches!(
-        program.instrs.as_slice(),
-        [
-            RuntimeInstr::Mov {
-                dst: 0,
-                src: RuntimeOperand::Imm(1)
-            },
-            RuntimeInstr::Exit {
-                code: RuntimeOperand::Imm(1)
-            }
-        ]
-    ));
 }
 
 #[test]
@@ -1928,4 +2292,156 @@ fn optimize_runtime_generic_unswitches_immutable_strategy_branch() {
         "cold branch should be gone after unswitching: {:?}",
         program.instrs
     );
+}
+
+#[test]
+fn affine_lookahead_preserves_consumers_and_uses_saved_entry_state() {
+    let mut program = RuntimeProgram {
+        slots: 5,
+        instrs: vec![
+            RuntimeInstr::BinOp {
+                dst: 1,
+                op: RuntimeBinOp::Mul,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Imm(5),
+            },
+            RuntimeInstr::BinOp {
+                dst: 2,
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(1),
+                rhs: RuntimeOperand::Imm(7),
+            },
+            RuntimeInstr::BinOp {
+                dst: 3,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(2),
+                rhs: RuntimeOperand::Imm(255),
+            },
+            RuntimeInstr::Mov {
+                dst: 0,
+                src: RuntimeOperand::Slot(3),
+            },
+            RuntimeInstr::Mov {
+                dst: 4,
+                src: RuntimeOperand::Slot(0),
+            },
+            RuntimeInstr::BinOp {
+                dst: 1,
+                op: RuntimeBinOp::Mul,
+                lhs: RuntimeOperand::Slot(0),
+                rhs: RuntimeOperand::Imm(5),
+            },
+            RuntimeInstr::BinOp {
+                dst: 2,
+                op: RuntimeBinOp::Add,
+                lhs: RuntimeOperand::Slot(1),
+                rhs: RuntimeOperand::Imm(7),
+            },
+            RuntimeInstr::BinOp {
+                dst: 3,
+                op: RuntimeBinOp::BitAnd,
+                lhs: RuntimeOperand::Slot(2),
+                rhs: RuntimeOperand::Imm(255),
+            },
+            RuntimeInstr::Mov {
+                dst: 0,
+                src: RuntimeOperand::Slot(3),
+            },
+        ],
+    };
+    super::optimize_affine_lookahead(&mut program);
+    assert_eq!(program.slots, 6);
+    assert!(matches!(
+        program.instrs.first(),
+        Some(RuntimeInstr::Mov {
+            dst: 5,
+            src: RuntimeOperand::Slot(0)
+        })
+    ));
+    assert!(matches!(
+        program.instrs.get(6),
+        Some(RuntimeInstr::BinOp {
+            op: RuntimeBinOp::Mul,
+            lhs: RuntimeOperand::Slot(5),
+            rhs: RuntimeOperand::Imm(25),
+            ..
+        })
+    ));
+    assert!(matches!(
+        program.instrs.get(5),
+        Some(RuntimeInstr::Mov {
+            dst: 4,
+            src: RuntimeOperand::Slot(0)
+        })
+    ));
+}
+
+#[test]
+fn dead_prefix_reduction_rejects_observable_nonterminal_prefixes() {
+    let mut instrs = vec![
+        RuntimeInstr::Mov {
+            dst: 4,
+            src: RuntimeOperand::Slot(1),
+        },
+        RuntimeInstr::Mov {
+            dst: 5,
+            src: RuntimeOperand::Slot(0),
+        },
+        RuntimeInstr::BinOp {
+            dst: 6,
+            op: RuntimeBinOp::Add,
+            lhs: RuntimeOperand::Slot(4),
+            rhs: RuntimeOperand::Slot(5),
+        },
+        RuntimeInstr::Mov {
+            dst: 1,
+            src: RuntimeOperand::Slot(6),
+        },
+        RuntimeInstr::Mov {
+            dst: 4,
+            src: RuntimeOperand::Slot(2),
+        },
+        RuntimeInstr::Mov {
+            dst: 5,
+            src: RuntimeOperand::Slot(1),
+        },
+        RuntimeInstr::BinOp {
+            dst: 6,
+            op: RuntimeBinOp::Add,
+            lhs: RuntimeOperand::Slot(4),
+            rhs: RuntimeOperand::Slot(5),
+        },
+        RuntimeInstr::Mov {
+            dst: 2,
+            src: RuntimeOperand::Slot(6),
+        },
+        RuntimeInstr::Mov {
+            dst: 4,
+            src: RuntimeOperand::Slot(3),
+        },
+        RuntimeInstr::Mov {
+            dst: 5,
+            src: RuntimeOperand::Slot(2),
+        },
+        RuntimeInstr::BinOp {
+            dst: 6,
+            op: RuntimeBinOp::Add,
+            lhs: RuntimeOperand::Slot(4),
+            rhs: RuntimeOperand::Slot(5),
+        },
+        RuntimeInstr::Mov {
+            dst: 3,
+            src: RuntimeOperand::Slot(6),
+        },
+        RuntimeInstr::BinOp {
+            dst: 7,
+            op: RuntimeBinOp::BitXor,
+            lhs: RuntimeOperand::Slot(1),
+            rhs: RuntimeOperand::Slot(3),
+        },
+        RuntimeInstr::Exit {
+            code: RuntimeOperand::Slot(7),
+        },
+    ];
+    assert!(!super::reduce_one_dead_prefix_output(&mut instrs));
 }

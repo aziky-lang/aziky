@@ -4,9 +4,7 @@
 pub enum LoweredStmt {
     Print(String),
     Exit(u64),
-    RuntimeGeneric {
-        program: RuntimeProgram,
-    },
+    RuntimeGeneric { program: RuntimeProgram },
 }
 
 #[derive(Debug, Clone)]
@@ -173,37 +171,6 @@ pub enum RuntimeInstr {
         dst_ptr: RuntimeOperand,
         src_ptr: RuntimeOperand,
         bytes: RuntimeOperand,
-    },
-    #[doc(hidden)]
-    BloomSplitBlockInsert {
-        filter_slots: Vec<usize>,
-        hash: RuntimeOperand,
-    },
-    #[doc(hidden)]
-    BloomSplitBlockCheck {
-        dst: usize,
-        filter_slots: Vec<usize>,
-        hash: RuntimeOperand,
-    },
-    #[doc(hidden)]
-    BloomClassic4Check {
-        dst: usize,
-        lanes_checked: usize,
-        filter_slots: Vec<usize>,
-        hash: RuntimeOperand,
-    },
-    #[doc(hidden)]
-    HashCtrlGroupProbe {
-        dst_mask: usize,
-        ctrl_slots: Vec<usize>,
-        group_start: RuntimeOperand,
-        fingerprint: RuntimeOperand,
-    },
-    #[doc(hidden)]
-    JoinSelectAdaptive {
-        dst: usize,
-        build_rows: RuntimeOperand,
-        probe_rows: RuntimeOperand,
     },
     Alloc {
         dst: usize,
