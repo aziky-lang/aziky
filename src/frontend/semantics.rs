@@ -1145,6 +1145,26 @@ fn monomorphize_trait_impls(
 }
 
 pub fn lower_program(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> {
+    lower_program_native(program)
+}
+
+pub fn lower_program_automatic(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> {
+    lower_program_with_mode(program, false, false)
+}
+
+pub fn lower_program_native(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> {
+    lower_program_with_mode(program, true, false)
+}
+
+pub fn lower_program_compile_time(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> {
+    lower_program_with_mode(program, false, true)
+}
+
+fn lower_program_with_mode(
+    program: &Program,
+    native_only: bool,
+    compile_time_only: bool,
+) -> Result<Vec<LoweredStmt>, Diagnostic> {
     let mut index = ProgramIndex::default();
     for def in builtin_generic_enums() {
         index.enums.insert(def.name.clone(), def);
@@ -1339,10 +1359,15 @@ pub fn lower_program(program: &Program) -> Result<Vec<LoweredStmt>, Diagnostic> 
         .ok_or_else(|| Diagnostic::new("missing fn main()", 0, 0))?
         .clone();
 
-    match try_lower_runtime_generic(&main, &index.functions, &index.struct_layouts, &index.enums)? {
-        RuntimeGenericAttempt::Lowered(runtime_lowered) => return Ok(runtime_lowered),
-        RuntimeGenericAttempt::Fallback { reason } => {
-            maybe_report_runtime_generic_fallback(&main, &reason);
+    if !compile_time_only {
+        match try_lower_runtime_generic(&main, &index.functions, &index.struct_layouts, &index.enums)? {
+            RuntimeGenericAttempt::Lowered(runtime_lowered) => return Ok(runtime_lowered),
+            RuntimeGenericAttempt::Fallback { reason } => {
+                if native_only {
+                    return Err(reason.required_diagnostic());
+                }
+                maybe_report_runtime_generic_fallback(&main, &reason);
+            }
         }
     }
 

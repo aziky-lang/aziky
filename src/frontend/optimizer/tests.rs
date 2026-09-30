@@ -95,7 +95,7 @@ fn peephole_does_not_leak_constants_across_forward_merge_points() {
 fn resource_receiver_optimization_keeps_all_control_flow_targets_in_bounds() {
     let source = "struct Bag { count: u64; values: list<u16>; } impl Bag { fn add(self: &mut Self, value: u16) { self.values.push(value); self.count = self.count + 1u64; } } fn main() { let seed: u64 = runtime_seed(); let mut bag: Bag = Bag { count: 1u64, values: [3u16] }; bag.add(5u16); bag.add(8u16); exit(seed & 0u64); }";
     let parsed = parse_program(source).expect("parse resource receiver program");
-    let mut lowered = crate::frontend::semantics::lower_program(&parsed)
+    let mut lowered = crate::frontend::semantics::lower_program_automatic(&parsed)
         .expect("lower resource receiver program");
     let passes: &[(&str, fn(Vec<LoweredStmt>) -> Vec<LoweredStmt>)] = &[
         ("hoist_loop_invariants", hoist_loop_invariants),
@@ -153,7 +153,7 @@ fn optimizer_preserves_owned_list_memory_operations_after_guard_cleanup_paths() 
         "fn main() { let mut v: list<u64> = []; v.push(1u64); v[0u64] = 9u64; exit(v[0u64]); }",
     )
     .unwrap();
-    let lowered = crate::frontend::semantics::lower_program(&parsed).unwrap();
+    let lowered = crate::frontend::semantics::lower_program_automatic(&parsed).unwrap();
     let optimized = optimize_semantics_ir(lowered);
     let program = optimized
         .iter()
@@ -1507,7 +1507,7 @@ fn optimize_runtime_generic_elides_index_checks_for_induction_plus_constant() {
 fn optimize_runtime_generic_elides_ring_mask_indices_from_source() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut arr: [u64; 8] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let mut i: u64 = 0u64; while i < 1000u64 { state = state * 1664525u64 + 1013904223u64; let idx: u64 = i & 7u64; arr[idx] = state; i = i + 1u64; } exit(state ^ arr[0u8]); }";
     let program = parse_program(src).expect("parse failed");
-    let lowered = crate::frontend::semantics::lower_program(&program).expect("lower failed");
+    let lowered = crate::frontend::semantics::lower_program_automatic(&program).expect("lower failed");
     let optimized = optimize_semantics_ir(lowered);
     let runtime = optimized
         .iter()
@@ -1530,7 +1530,7 @@ fn optimize_runtime_generic_elides_ring_mask_indices_from_source() {
 fn optimize_runtime_generic_elides_ring_mask_indices_from_invariant_slot() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut arr: [u64; 64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let mask: u64 = 63u64; let mut i: u64 = 0u64; while i < 1000u64 { state = state * 1664525u64 + 1013904223u64; let idx: u64 = i & mask; arr[idx] = state; i = i + 1u64; } exit(state ^ arr[0u8]); }";
     let program = parse_program(src).expect("parse failed");
-    let lowered = crate::frontend::semantics::lower_program(&program).expect("lower failed");
+    let lowered = crate::frontend::semantics::lower_program_automatic(&program).expect("lower failed");
     let optimized = optimize_semantics_ir(lowered);
     let runtime = optimized
         .iter()
@@ -1553,7 +1553,7 @@ fn optimize_runtime_generic_elides_ring_mask_indices_from_invariant_slot() {
 fn optimize_runtime_generic_elides_masked_dynamic_index_not_from_induction_slot() {
     let src = "fn main() { let mut state: u64 = runtime_seed(); let mut arr: [u64; 8] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]; let mut i: u64 = 0u64; while i < 100u64 { state = state * 1664525u64 + 1013904223u64; let idx: u64 = state & 7u64; arr[idx] = state; i = i + 1u64; } exit(state); }";
     let program = parse_program(src).expect("parse failed");
-    let lowered = crate::frontend::semantics::lower_program(&program).expect("lower failed");
+    let lowered = crate::frontend::semantics::lower_program_automatic(&program).expect("lower failed");
     let optimized = optimize_semantics_ir(lowered);
     let runtime = optimized
         .iter()
@@ -1927,7 +1927,7 @@ fn optimized_runtime_program_from_file(path: &str) -> crate::frontend::semantics
     let src = fs::read_to_string(path).expect("read benchmark source");
     let parsed = parse_program(&src).expect("parse benchmark source");
     let lowered =
-        crate::frontend::semantics::lower_program(&parsed).expect("lower benchmark source");
+        crate::frontend::semantics::lower_program_automatic(&parsed).expect("lower benchmark source");
     let optimized = optimize_semantics_ir(lowered);
     optimized
         .into_iter()
@@ -2065,7 +2065,7 @@ fn generic_affine_index_loop_collapses_after_canonical_pipeline_prefix() {
     let source = "fn main() { let mut value: u64 = runtime_seed(); let mut cursor: u64 = 0u64; while cursor < 73u64 { value = ((value << 3u8) + cursor) & 288230376151711743u64; value = ((value << 2u8) - 3u64) & 288230376151711743u64; cursor = cursor + 1u64; } exit(value & 127u64); }";
     let parsed = parse_program(source).expect("parse affine-index recurrence");
     let mut lowered =
-        crate::frontend::semantics::lower_program(&parsed).expect("lower affine-index recurrence");
+        crate::frontend::semantics::lower_program_automatic(&parsed).expect("lower affine-index recurrence");
     for pass in [
         hoist_loop_invariants,
         const_fold,
@@ -2106,7 +2106,7 @@ fn generic_affine_loop_collapse_is_independent_of_source_spelling_and_setup_orde
     for source in sources {
         let parsed = parse_program(source).expect("parse varied recurrence");
         let lowered =
-            crate::frontend::semantics::lower_program(&parsed).expect("lower varied recurrence");
+            crate::frontend::semantics::lower_program_automatic(&parsed).expect("lower varied recurrence");
         let optimized = optimize_semantics_ir(lowered);
         let program = optimized
             .iter()
@@ -2146,7 +2146,7 @@ fn generic_affine_loop_collapse_is_independent_of_source_spelling_and_setup_orde
 fn generic_affine_loop_collapse_rejects_observable_intermediate_work() {
     let source = "fn main() { let mut state: u64 = runtime_seed(); let mut sum: u64 = 0u64; let mut i: u64 = 0u64; while i < 64u64 { state = (state * 5u64 + 7u64) & 255u64; sum = sum + state; i = i + 1u64; } exit(sum); }";
     let parsed = parse_program(source).expect("parse recurrence with reduction");
-    let lowered = crate::frontend::semantics::lower_program(&parsed)
+    let lowered = crate::frontend::semantics::lower_program_automatic(&parsed)
         .expect("lower recurrence with reduction");
     let optimized = optimize_semantics_ir(lowered);
     let program = optimized

@@ -9,7 +9,7 @@ use crate::frontend::ast::Program;
 
 pub use diagnostics::Diagnostic;
 pub use optimizer::optimize_semantics_ir;
-pub use semantics::{LoweredStmt, lower_program};
+pub use semantics::{LoweredStmt, lower_program, lower_program_native};
 
 pub fn parse_program(source: &str) -> Result<Program, Diagnostic> {
     let tokens = lexer::lex(source)?;

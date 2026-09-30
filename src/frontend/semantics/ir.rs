@@ -132,6 +132,10 @@ pub enum RuntimeInstr {
         signed: bool,
         stable: bool,
     },
+    FrameSave,
+    FrameRestore {
+        preserve: Vec<usize>,
+    },
     Call {
         target: usize,
     },

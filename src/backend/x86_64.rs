@@ -1984,6 +1984,8 @@ fn runtime_instr_reads_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         | RuntimeInstr::ChannelClose { handle, .. }
         | RuntimeInstr::ChannelDestroy { handle } => runtime_operand_reads_slot(handle, slot),
         RuntimeInstr::PrintConst { .. } => false,
+        RuntimeInstr::FrameSave => true,
+        RuntimeInstr::FrameRestore { preserve } => preserve.contains(&slot),
         RuntimeInstr::PrintInt { value, .. } => runtime_operand_reads_slot(value, slot),
     }
 }
@@ -2029,6 +2031,8 @@ fn runtime_instr_writes_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         | RuntimeInstr::ChannelClose { .. }
         | RuntimeInstr::ChannelDestroy { .. } => false,
         RuntimeInstr::HeapStoreInt { .. } | RuntimeInstr::HeapCopy { .. } => false,
+        RuntimeInstr::FrameSave => false,
+        RuntimeInstr::FrameRestore { preserve } => !preserve.contains(&slot),
     }
 }
 
@@ -2242,7 +2246,10 @@ fn bump_instr_uses(counts: &mut [u32], instr: &RuntimeInstr, weight: u32) {
         }
         RuntimeInstr::PrintConst { .. } => {}
         RuntimeInstr::PrintInt { value, .. } => bump_operand_use_weight(counts, value, weight),
-        RuntimeInstr::Call { .. } | RuntimeInstr::Return => {}
+        RuntimeInstr::Call { .. } | RuntimeInstr::Return | RuntimeInstr::FrameSave => {}
+        RuntimeInstr::FrameRestore { preserve } => {
+            for slot in preserve { bump_slot_use_weight(counts, *slot, weight); }
+        }
         RuntimeInstr::Exit { code } => bump_operand_use_weight(counts, code, weight),
     }
 }

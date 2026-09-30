@@ -1492,7 +1492,7 @@ impl RuntimeFallbackReason {
         )
     }
 
-    fn required_diagnostic(&self) -> Diagnostic {
+    pub(super) fn required_diagnostic(&self) -> Diagnostic {
         Diagnostic::at_span(
             format!(
                 "[{}] native execution is required but runtime lowering failed: {}",
@@ -1555,14 +1555,15 @@ pub(super) fn try_lower_runtime_generic(
         .and_then(|_| builder.lower_queued_functions())
         .and_then(|_| builder.patch_calls())
     {
-        Ok(()) => Ok(RuntimeGenericAttempt::Lowered(vec![
-            LoweredStmt::RuntimeGeneric {
+        Ok(()) => {
+            builder.strip_frames_without_recursion();
+            Ok(RuntimeGenericAttempt::Lowered(vec![LoweredStmt::RuntimeGeneric {
                 program: RuntimeProgram {
                     slots: builder.slots,
                     instrs: builder.instrs,
                 },
-            },
-        ])),
+            }]))
+        }
         Err(RuntimeGenericLowerError::Unsupported) => {
             let reason = RuntimeFallbackReason::new(
                 RuntimeFallbackClass::UnsupportedConstruct,
@@ -1643,14 +1644,7 @@ fn validate_runtime_generic_function_calls(
         return Ok(());
     }
     if visiting.iter().any(|current| current == name) {
-        return Err(type_error(
-            format!(
-                "runtime generic lowering does not support recursive call '{}'",
-                source_callable_name(name)
-            )
-            .as_str(),
-            span,
-        ));
+        return Ok(());
     }
     if visiting.len() >= max_depth {
         return Err(type_error("runtime generic call depth exceeded", span));

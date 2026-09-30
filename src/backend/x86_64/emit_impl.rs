@@ -156,7 +156,8 @@ impl X86Program {
                     | RuntimeInstr::ChannelDestroy { .. }
             )
         });
-        let slot_map = if uses_threads {
+        let uses_call_frames = program.instrs.iter().any(|instr| matches!(instr, RuntimeInstr::FrameSave));
+        let slot_map = if uses_threads || uses_call_frames {
             RuntimeSlotMap::stack_only(lir.slot_count)
         } else {
             RuntimeSlotMap::from_lir(&lir)
@@ -1178,6 +1179,44 @@ impl X86Program {
                         *stable,
                         &slot_map,
                     );
+                }
+                RuntimeInstr::FrameSave => {
+                    let bytes = slot_map.stack_bytes();
+                    let aligned = bytes.div_ceil(16) * 16;
+                    if aligned != 0 {
+                        self.code.extend_from_slice(&[0x48, 0x81, 0xEC]); // sub rsp, imm32
+                        self.code.extend_from_slice(&(aligned as u32).to_le_bytes());
+                        self.code.extend_from_slice(&[0x48, 0x8D, 0xB5]); // lea rsi, [rbp - bytes]
+                        self.code.extend_from_slice(&(-(bytes as i32)).to_le_bytes());
+                        self.code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+                        self.code.push(0xB9); // mov ecx, slot count
+                        self.code.extend_from_slice(&((bytes / 8) as u32).to_le_bytes());
+                        self.code.extend_from_slice(&[0xFC, 0xF3, 0x48, 0xA5]); // cld; rep movsq
+                    }
+                }
+                RuntimeInstr::FrameRestore { preserve } => {
+                    let bytes = slot_map.stack_bytes();
+                    let aligned = bytes.div_ceil(16) * 16;
+                    let mut preserve = preserve.clone();
+                    preserve.sort_unstable();
+                    preserve.dedup();
+                    let mut start = 0;
+                    for end in preserve.into_iter().chain(std::iter::once(bytes / 8)) {
+                        assert!(end <= bytes / 8, "return slot beyond frame");
+                        if start < end {
+                            self.code.extend_from_slice(&[0x48, 0x8D, 0xB4, 0x24]); // lea rsi, [rsp + start*8]
+                            self.code.extend_from_slice(&((start * 8) as i32).to_le_bytes());
+                            self.emit_lea_rdi_rbp_disp(-(bytes as i32) + (start * 8) as i32);
+                            self.code.push(0xB9); // mov ecx, segment length
+                            self.code.extend_from_slice(&((end - start) as u32).to_le_bytes());
+                            self.code.extend_from_slice(&[0xFC, 0xF3, 0x48, 0xA5]); // cld; rep movsq
+                        }
+                        start = end.saturating_add(1);
+                    }
+                    if aligned != 0 {
+                        self.code.extend_from_slice(&[0x48, 0x81, 0xC4]); // add rsp, imm32
+                        self.code.extend_from_slice(&(aligned as u32).to_le_bytes());
+                    }
                 }
                 RuntimeInstr::Call { target } => {
                     let tail_call = idx + 1 < program.instrs.len()

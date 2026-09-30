@@ -531,7 +531,9 @@ fn runtime_slot_read_before_write_from(instrs: &[RuntimeInstr], start: usize, sl
                 pending.push(index + 1);
             }
             RuntimeInstr::Call { .. } | RuntimeInstr::ThreadSpawn { .. } => return true,
-            RuntimeInstr::Return | RuntimeInstr::Exit { .. } => {}
+            RuntimeInstr::Return | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
+            | RuntimeInstr::Exit { .. } => {}
             _ => pending.push(index + 1),
         }
     }
@@ -704,6 +706,8 @@ fn peephole_optimize_runtime_instrs(slots: usize, instrs: &[RuntimeInstr]) -> Ve
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -1148,6 +1152,10 @@ fn fold_runtime_instr(
             clear_const_slots(const_slots);
             Some(RuntimeInstr::Return)
         }
+        RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. } => {
+            clear_const_slots(const_slots);
+            Some(instr.clone())
+        }
         RuntimeInstr::Exit { code } => {
             let code = fold_operand_const(code, const_slots);
             // An exit terminates its basic block. Instructions laid out after it may be a
@@ -1428,6 +1436,11 @@ fn inline_runtime_generic_leaf_calls(stmts: Vec<LoweredStmt>) -> Vec<LoweredStmt
 }
 
 fn inline_leaf_calls_in_program(instrs: &mut Vec<RuntimeInstr>) {
+    // Inlining a call without rewriting its surrounding frame save/restore
+    // invalidates return-slot preservation.
+    if instrs.iter().any(|instr| matches!(instr, RuntimeInstr::FrameSave)) {
+        return;
+    }
     const MAX_INLINE_EXPANSION: usize = 16_384;
     let mut added = 0usize;
     loop {
@@ -1980,6 +1993,10 @@ fn copy_propagate_runtime_instrs(slots: usize, instrs: &[RuntimeInstr]) -> Vec<R
                     signed: *signed,
                     bits: *bits,
                 });
+            }
+            RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. } => {
+                out.push(instr.clone());
+                clear_aliases(&mut alias);
             }
             RuntimeInstr::Return => {
                 out.push(RuntimeInstr::Return);
@@ -2984,6 +3001,8 @@ fn rewrite_unrolled_instr_with_index(
         | RuntimeInstr::CompareSwap { .. }
         | RuntimeInstr::RadixSortFixedInt { .. }
         | RuntimeInstr::Call { .. }
+        | RuntimeInstr::FrameSave
+        | RuntimeInstr::FrameRestore { .. }
         | RuntimeInstr::ThreadSpawn { .. }
         | RuntimeInstr::PrintConst { .. }
         | RuntimeInstr::Return => instr.clone(),
@@ -3216,6 +3235,8 @@ fn unroll_runtime_small_counted_loops_in_program(instrs: &mut Vec<RuntimeInstr>)
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -3704,6 +3725,10 @@ fn runtime_program_slot_count(instrs: &[RuntimeInstr]) -> usize {
             RuntimeInstr::PrintInt { value, .. } => {
                 bump_operand(&mut max_slot, &mut saw_any, value);
             }
+            RuntimeInstr::FrameSave => {}
+            RuntimeInstr::FrameRestore { preserve } => {
+                for slot in preserve { bump_slot(&mut max_slot, &mut saw_any, *slot); }
+            }
             RuntimeInstr::Return => {}
             RuntimeInstr::Exit { code } => bump_operand(&mut max_slot, &mut saw_any, code),
         }
@@ -3939,6 +3964,7 @@ fn runtime_transfer_slot_facts(
         RuntimeInstr::Free { .. } | RuntimeInstr::FileClose { .. } => {}
         RuntimeInstr::PrintConst { .. } => {}
         RuntimeInstr::PrintInt { .. } => {}
+        RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. } => {}
         RuntimeInstr::Return => {}
         RuntimeInstr::Exit { .. } => {}
     }
@@ -4841,6 +4867,10 @@ fn update_local_slot_upper_from_instr(
             local_upper.clear();
             guarded_upper.clear();
         }
+        RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. } => {
+            local_upper.clear();
+            guarded_upper.clear();
+        }
         RuntimeInstr::JumpIfCmpFalse { .. } => {}
         RuntimeInstr::JumpIfZero { .. } => {}
     }
@@ -5198,6 +5228,8 @@ fn shift_runtime_targets_for_insert(instrs: &mut [RuntimeInstr], at: usize, amou
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -5576,6 +5608,10 @@ fn mark_used_slots(instr: &RuntimeInstr, used: &mut [bool]) {
         }
         RuntimeInstr::PrintConst { .. } => {}
         RuntimeInstr::PrintInt { value, .. } => mark_operand_used(value, used),
+        RuntimeInstr::FrameSave => {}
+        RuntimeInstr::FrameRestore { preserve } => {
+            for slot in preserve { mark_slot_used(*slot, used); }
+        }
         RuntimeInstr::Return => {}
         RuntimeInstr::Exit { code } => mark_operand_used(code, used),
     }
@@ -5741,6 +5777,10 @@ fn remap_instr_slots(instr: &mut RuntimeInstr, remap: &[usize]) {
         }
         RuntimeInstr::PrintConst { .. } => {}
         RuntimeInstr::PrintInt { value, .. } => remap_operand_slots(value, remap),
+        RuntimeInstr::FrameSave => {}
+        RuntimeInstr::FrameRestore { preserve } => {
+            for slot in preserve { *slot = remap[*slot]; }
+        }
         RuntimeInstr::Return => {}
         RuntimeInstr::Exit { code } => remap_operand_slots(code, remap),
     }
@@ -5947,6 +5987,8 @@ fn simplify_runtime_control_flow_instrs(mut instrs: Vec<RuntimeInstr>) -> Vec<Ru
             | RuntimeInstr::ChannelDestroy { .. }
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Return
             | RuntimeInstr::Exit { .. } => None,
         };
@@ -5994,6 +6036,8 @@ fn simplify_runtime_control_flow_instrs(mut instrs: Vec<RuntimeInstr>) -> Vec<Ru
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -6056,6 +6100,8 @@ fn compute_runtime_reachable(instrs: &[RuntimeInstr]) -> Vec<bool> {
             }
             RuntimeInstr::Return | RuntimeInstr::Exit { .. } => {}
             RuntimeInstr::LoadSeed { .. }
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Mov { .. }
             | RuntimeInstr::BinOp { .. }
             | RuntimeInstr::BinOpInPlace { .. }
@@ -6156,6 +6202,8 @@ fn compact_runtime_instrs(instrs: Vec<RuntimeInstr>, reachable: &[bool]) -> Vec<
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -6226,6 +6274,8 @@ fn compact_runtime_instrs(instrs: Vec<RuntimeInstr>, reachable: &[bool]) -> Vec<
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -6254,6 +6304,8 @@ fn leaf_body_end(instrs: &[RuntimeInstr], target: usize) -> Option<usize> {
             | RuntimeInstr::FileWrite { .. }
             | RuntimeInstr::FileRead { .. }
             | RuntimeInstr::FileClose { .. }
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => return None,
             RuntimeInstr::LoadSeed { .. }
             | RuntimeInstr::Mov { .. }
@@ -6324,6 +6376,8 @@ fn remap_instr_targets_after_inline(instrs: &mut [RuntimeInstr], call_idx: usize
             | RuntimeInstr::PrintConst { .. }
             | RuntimeInstr::PrintInt { .. }
             | RuntimeInstr::Return
+            | RuntimeInstr::FrameSave
+            | RuntimeInstr::FrameRestore { .. }
             | RuntimeInstr::Exit { .. } => {}
         }
     }
@@ -7123,6 +7177,8 @@ fn runtime_instr_reads_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         RuntimeInstr::PrintInt { value, .. } => runtime_operand_reads_slot(value, slot),
         RuntimeInstr::Call { .. } | RuntimeInstr::Return => false,
         RuntimeInstr::Exit { code } => runtime_operand_reads_slot(code, slot),
+        RuntimeInstr::FrameSave => true,
+        RuntimeInstr::FrameRestore { preserve } => preserve.contains(&slot),
     }
 }
 
@@ -7166,6 +7222,8 @@ fn runtime_instr_writes_slot(instr: &RuntimeInstr, slot: usize) -> bool {
         RuntimeInstr::ChannelSend { .. }
         | RuntimeInstr::ChannelClose { .. }
         | RuntimeInstr::ChannelDestroy { .. } => false,
+        RuntimeInstr::FrameSave => false,
+        RuntimeInstr::FrameRestore { preserve } => !preserve.contains(&slot),
     }
 }
 

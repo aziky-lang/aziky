@@ -22,7 +22,7 @@ use frontend::ast::{
     EnumVariantPayloadDef, Expr, Function, Item, MatchPattern, Program, Stmt, TypeName,
 };
 use frontend::semantics::{RuntimeInstr, RuntimeLoadKind};
-use frontend::{LoweredStmt, lower_program, optimize_semantics_ir};
+use frontend::{LoweredStmt, lower_program_native, optimize_semantics_ir};
 use object::artifact::{ArtifactMetadata, DebugDeclaration, DebugSource};
 use object::elf64::emit_elf64_executable;
 use object::macho64::emit_macho64_executable;
@@ -93,7 +93,12 @@ fn compile_mode(args: &[String]) -> Result<(), String> {
     let input = PathBuf::from(&args[0]);
     let options = parse_compile_args(&args[1..])?;
     options.target.require_codegen()?;
-    let mut prepared = prepare_lower_optimize_package_mode(&input, &options.package_options, true)?;
+    let mut prepared = prepare_lower_optimize_package_mode(
+        &input,
+        &options.package_options,
+        true,
+        if options.compile_time_main { LoweringMode::CompileTime } else { LoweringMode::Native },
+    )?;
     validate_target_runtime(&prepared.lowered, options.target)?;
     prepared.metadata.target = options.target.triple().to_string();
     let compiled = compile_program(&prepared.lowered, &options.backend_options);
@@ -899,32 +904,40 @@ fn legacy_emit_mode(args: &[String]) -> Result<(), String> {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn parse_lower_optimize(input: &Path) -> Result<Vec<LoweredStmt>, String> {
-    parse_lower_optimize_with_packages(input, &PackageOptions::defaults_enabled())
+    parse_lower_optimize_package_mode(input, &PackageOptions::defaults_enabled(), true, false)
 }
 
 fn parse_lower_optimize_with_packages(
     input: &Path,
     package_options: &PackageOptions,
 ) -> Result<Vec<LoweredStmt>, String> {
-    parse_lower_optimize_package_mode(input, package_options, true)
+    parse_lower_optimize_package_mode(input, package_options, true, true)
 }
 
 fn parse_lower_optimize_package_member(
     input: &Path,
     package_options: &PackageOptions,
 ) -> Result<Vec<LoweredStmt>, String> {
-    parse_lower_optimize_package_mode(input, package_options, false)
+    parse_lower_optimize_package_mode(input, package_options, false, true)
 }
 
 fn parse_lower_optimize_package_mode(
     input: &Path,
     package_options: &PackageOptions,
     require_manifest_entry: bool,
+    native_only: bool,
 ) -> Result<Vec<LoweredStmt>, String> {
     Ok(
-        prepare_lower_optimize_package_mode(input, package_options, require_manifest_entry)?
+        prepare_lower_optimize_package_mode(input, package_options, require_manifest_entry, if native_only { LoweringMode::Native } else { LoweringMode::Auto })?
             .lowered,
     )
+}
+
+#[derive(Clone, Copy)]
+enum LoweringMode {
+    Native,
+    Auto,
+    CompileTime,
 }
 
 struct PreparedProgram {
@@ -936,6 +949,7 @@ fn prepare_lower_optimize_package_mode(
     input: &Path,
     package_options: &PackageOptions,
     require_manifest_entry: bool,
+    mode: LoweringMode,
 ) -> Result<PreparedProgram, String> {
     let graph = package::resolve_for_input(input, package_options)?;
     if require_manifest_entry && let Some(graph) = &graph {
@@ -951,8 +965,12 @@ fn prepare_lower_optimize_package_mode(
         }
     }
     let (program, sources) = load_project_program_with_packages(input, graph.as_ref())?;
-    let lowered =
-        lower_program(&program).map_err(|e| sources.render(&e.with_context("semantics::lower")))?;
+    let lowered = match mode {
+        LoweringMode::Native => lower_program_native(&program),
+        LoweringMode::Auto => frontend::semantics::lower_program_automatic(&program),
+        LoweringMode::CompileTime => frontend::semantics::lower_program_compile_time(&program),
+    }
+    .map_err(|e| sources.render(&e.with_context("semantics::lower")))?;
     let metadata = build_artifact_metadata(input, graph.as_ref(), &sources)?;
     Ok(PreparedProgram {
         lowered: optimize_semantics_ir(lowered),
@@ -2045,6 +2063,7 @@ struct CompileArgs {
     dump_lir: bool,
     backend_options: X86BackendOptions,
     package_options: PackageOptions,
+    compile_time_main: bool,
 }
 
 struct CompiledProgram {
@@ -2069,6 +2088,7 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
     let mut preserve_full_checksum = false;
     let mut profile_instrument = false;
     let mut package_options = PackageOptions::defaults_enabled();
+    let mut compile_time_main = false;
     while i < args.len() {
         match args[i].as_str() {
             "-o" | "--output" => {
@@ -2136,6 +2156,10 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
                     .ok_or_else(|| String::from("--target-features requires a value"))?;
                 target_features = parse_target_features(value)?;
                 i += 2;
+            }
+            "--compile-time-main" => {
+                compile_time_main = true;
+                i += 1;
             }
             "--dump-lir" => {
                 dump_lir = true;
@@ -2211,6 +2235,7 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
             profile_instrument,
         },
         package_options,
+        compile_time_main,
     })
 }
 
@@ -2306,7 +2331,7 @@ fn decode_escaped_newlines(input: &str) -> String {
 fn usage() -> String {
     String::from(
         "usage:\n\
-         aziky compile <input.azk> -o <output> [--target <triple>] [--emit executable|object|static-library|shared-library] [--format elf64|macho64|coff] [--features <list>] [--no-default-features] [--package-cache <path>] [--profile-generate <path>] [--profile-instrument] [--profile-use <path>] [--target-cpu <cpu|native>] [--target-features <list>] [--dump-lir] [--preserve-full-checksum] [--emit-full-checksum]\n\
+         aziky compile <input.azk> -o <output> [--target <triple>] [--emit executable|object|static-library|shared-library] [--format elf64|macho64|coff] [--features <list>] [--no-default-features] [--package-cache <path>] [--profile-generate <path>] [--profile-instrument] [--profile-use <path>] [--target-cpu <cpu|native>] [--target-features <list>] [--dump-lir] [--preserve-full-checksum] [--emit-full-checksum] [--compile-time-main]\n\
          aziky profile-merge <template> <raw-counts> -o <profile>\n\
          aziky check <input.azk> [--diagnostic-format json] [--features <list>] [--no-default-features] [--package-cache <path>]\n\
          aziky package lock [path] [--features <list>] [--no-default-features] [--package-cache <path>]\n\
@@ -2496,6 +2521,50 @@ mod tests {
         let path = env::temp_dir().join(format!("aziky-{name}-{unique}"));
         fs::create_dir_all(&path).expect("create temporary project");
         path
+    }
+
+    #[test]
+    fn compile_requires_native_lowering_unless_compile_time_main_is_explicit() {
+        let project = temporary_project("native-mode");
+        let input = project.join("main.azk");
+        let output = project.join("program");
+        fs::write(
+            &input,
+            "fn add1(x: i32) -> i32 { return x + 1i32; } fn main() { let y: i32 = add1(41i32); print(y.to_str()); exit(0); }",
+        )
+        .expect("write source");
+        let input_arg = input.to_string_lossy().into_owned();
+        let output_arg = output.to_string_lossy().into_owned();
+        let error = compile_mode(&[input_arg.clone(), "-o".into(), output_arg.clone()])
+            .expect_err("native compilation must reject semantic fallback");
+        assert!(error.contains("runtime lowering failed"), "{error}");
+        assert!(!output.exists());
+        compile_mode(&[
+            input_arg,
+            "-o".into(),
+            output_arg,
+            "--compile-time-main".into(),
+        ])
+        .expect("explicit compile-time main must retain legacy evaluation");
+        let run = Command::new(&output).output().expect("run compiled program");
+        assert!(run.status.success());
+        assert_eq!(run.stdout, b"42");
+        fs::remove_dir_all(project).expect("remove temporary project");
+    }
+
+    #[test]
+    fn explicit_compile_time_main_evaluates_even_native_supported_code() {
+        let project = temporary_project("compile-time-mode");
+        let input = project.join("main.azk");
+        fs::write(&input, "fn main() { print(7u64); exit(0u64); }").expect("write source");
+        let package_options = PackageOptions::defaults_enabled();
+        let native = prepare_lower_optimize_package_mode(&input, &package_options, true, LoweringMode::Native)
+            .expect("native lowering");
+        assert!(matches!(native.lowered.first(), Some(LoweredStmt::RuntimeGeneric { .. })));
+        let evaluated = prepare_lower_optimize_package_mode(&input, &package_options, true, LoweringMode::CompileTime)
+            .expect("compile-time evaluation");
+        assert!(matches!(evaluated.lowered.first(), Some(LoweredStmt::Print(value)) if value == "7"));
+        fs::remove_dir_all(project).expect("remove temporary project");
     }
 
     #[test]
@@ -2753,6 +2822,47 @@ mod tests {
         assert_eq!(status.code(), Some(7));
 
         let _ = fs::remove_dir_all(project);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recursive_calls_preserve_caller_locals_in_native_elf() {
+        let project = temporary_project("recursive-call-frames");
+        let input = project.join("main.azk");
+        let binary = project.join("main.bin");
+        fs::write(&input, "mod std; use std::argument_count; fn sum(n: u64) -> u64 { if n == 0u64 { return 0u64; } let keep: u64 = n * 3u64; let child: u64 = sum(n - 1u64); return child + keep; } fn main() { let depth: u64 = argument_count() + 10u64; exit(sum(depth)); }").expect("write recursive program");
+        compile_mode(&[input.to_string_lossy().into_owned(), "-o".into(), binary.to_string_lossy().into_owned()]).expect("compile recursive native program");
+        let first = Command::new(&binary).output().expect("execute first recursion depth");
+        let second = Command::new(&binary).arg("deeper").output().expect("execute second recursion depth");
+        assert_eq!(first.status.code(), Some(198), "{first:?}");
+        assert_eq!(second.status.code(), Some(234), "{second:?}");
+        fs::remove_dir_all(project).expect("remove recursive project");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mutually_recursive_calls_with_nested_arguments_execute_natively() {
+        let project = temporary_project("mutual-recursive-call-frames");
+        let input = project.join("main.azk");
+        let binary = project.join("main.bin");
+        fs::write(&input, "mod std; use std::argument_count; fn identity(n: u64) -> u64 { return n; } fn even(n: u64) -> u64 { if n == 0u64 { return 1u64; } let keep: u64 = n; let child: u64 = odd(identity(n - 1u64)); return keep + child; } fn odd(n: u64) -> u64 { if n == 0u64 { return 2u64; } let keep: u64 = n * 2u64; let child: u64 = even(n - 1u64); return keep + child; } fn main() { exit(even(argument_count() + 5u64)); }").expect("write mutual recursion program");
+        compile_mode(&[input.to_string_lossy().into_owned(), "-o".into(), binary.to_string_lossy().into_owned()]).expect("compile mutual recursion");
+        assert_eq!(Command::new(&binary).status().expect("run first depth").code(), Some(31));
+        assert_eq!(Command::new(&binary).arg("next").status().expect("run second depth").code(), Some(42));
+        fs::remove_dir_all(project).expect("remove mutual recursion project");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recursive_owned_lists_survive_nested_calls_and_cleanup() {
+        let project = temporary_project("recursive-owned-lists");
+        let input = project.join("main.azk");
+        let binary = project.join("main.bin");
+        fs::write(&input, "mod std; use std::argument_count; fn sum(n: u64) -> u64 { if n == 0u64 { return 0u64; } let values: list<u64> = [n]; let child: u64 = sum(n - 1u64); return values[0u64] + child; } fn main() { exit(sum(argument_count() + 5u64)); }").expect("write recursive owner program");
+        compile_mode(&[input.to_string_lossy().into_owned(), "-o".into(), binary.to_string_lossy().into_owned()]).expect("compile recursive owner program");
+        assert_eq!(Command::new(&binary).status().expect("run first depth").code(), Some(21));
+        assert_eq!(Command::new(&binary).arg("next").status().expect("run second depth").code(), Some(28));
+        fs::remove_dir_all(project).expect("remove recursive owner project");
     }
 
     #[cfg(target_os = "linux")]

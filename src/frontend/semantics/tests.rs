@@ -1,5 +1,14 @@
-use super::lower_program;
+use super::lower_program_automatic as lower_program;
 use crate::frontend::lexer::lex;
+
+#[test]
+fn default_lowering_rejects_unsupported_native_construct() {
+    let source = "fn add1(x: i32) -> i32 { return x + 1i32; } fn main() { print(add1(41i32).to_str()); exit(0); }";
+    let program = parse(&lex(source).expect("lex failed")).expect("parse failed");
+    let error = super::lower_program(&program).expect_err("default must not evaluate main");
+    assert!(error.message.contains("runtime lowering failed"), "{error:?}");
+}
+
 use crate::frontend::parser::parse;
 
 #[cfg(any())]
@@ -1050,12 +1059,15 @@ fn lower_runtime_generic_return_requires_value() {
 }
 
 #[test]
-fn lower_runtime_generic_recursive_call_rejected() {
+fn lower_runtime_generic_recursive_call_lowers() {
     let src = "fn a() { let mut x: u64 = runtime_seed(); b(); exit(x); } fn b() { a(); } fn main() { a(); }";
     let tokens = lex(src).expect("lex failed");
     let program = parse(&tokens).expect("parse failed");
-    let err = lower_program(&program).expect_err("expected recursive call error");
-    assert!(err.message.contains("recursive"));
+    let lowered = lower_program(&program).expect("lower mutually recursive calls");
+    let super::LoweredStmt::RuntimeGeneric { program } = &lowered[0] else {
+        panic!("expected native runtime program");
+    };
+    assert!(program.instrs.iter().any(|instr| matches!(instr, super::RuntimeInstr::FrameSave)));
 }
 
 #[test]

@@ -2477,7 +2477,8 @@ pub(crate) fn read_slots(instr: &RuntimeInstr) -> Vec<usize> {
         RuntimeInstr::ChannelRecv { handle, .. }
         | RuntimeInstr::ChannelClose { handle, .. }
         | RuntimeInstr::ChannelDestroy { handle } => operand_slots(handle),
-        RuntimeInstr::PrintConst { .. } | RuntimeInstr::Return => Vec::new(),
+        RuntimeInstr::PrintConst { .. } | RuntimeInstr::Return | RuntimeInstr::FrameSave => Vec::new(),
+        RuntimeInstr::FrameRestore { preserve } => preserve.clone(),
         RuntimeInstr::PrintInt { value, .. } | RuntimeInstr::Exit { code: value } => {
             operand_slots(value)
         }
@@ -2519,6 +2520,8 @@ pub(crate) fn write_slots(instr: &RuntimeInstr) -> Vec<usize> {
         | RuntimeInstr::JumpIfZero { .. }
         | RuntimeInstr::JumpIfCmpFalse { .. }
         | RuntimeInstr::Call { .. }
+        | RuntimeInstr::FrameSave
+        | RuntimeInstr::FrameRestore { .. }
         | RuntimeInstr::Return
         | RuntimeInstr::Exit { .. }
         | RuntimeInstr::Free { .. }

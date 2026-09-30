@@ -29,6 +29,67 @@ impl<'a> RuntimeGenericBuilder<'a> {
         }
     }
 
+    pub(super) fn strip_frames_without_recursion(&mut self) {
+        let mut entries: Vec<_> = self.function_entries.values().copied().collect();
+        entries.sort_unstable();
+        fn recursive(
+            entry: usize,
+            entries: &[usize],
+            instrs: &[RuntimeInstr],
+            visiting: &mut HashSet<usize>,
+            visited: &mut HashSet<usize>,
+        ) -> bool {
+            if visiting.contains(&entry) {
+                return true;
+            }
+            if !visited.insert(entry) {
+                return false;
+            }
+            visiting.insert(entry);
+            let end = entries.iter().copied().find(|next| *next > entry).unwrap_or(instrs.len());
+            for instr in &instrs[entry..end] {
+                if let RuntimeInstr::Call { target } = instr
+                    && entries.binary_search(target).is_ok()
+                    && recursive(*target, entries, instrs, visiting, visited)
+                {
+                    return true;
+                }
+            }
+            visiting.remove(&entry);
+            false
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        if entries.iter().copied().any(|entry| {
+            recursive(entry, &entries, &self.instrs, &mut visiting, &mut visited)
+        }) {
+            return;
+        }
+        let mut remap = Vec::with_capacity(self.instrs.len() + 1);
+        let mut next = 0;
+        for instr in &self.instrs {
+            remap.push(next);
+            if !matches!(instr, RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. }) {
+                next += 1;
+            }
+        }
+        remap.push(next);
+        self.instrs.retain(|instr| !matches!(instr, RuntimeInstr::FrameSave | RuntimeInstr::FrameRestore { .. }));
+        for instr in &mut self.instrs {
+            let target = match instr {
+                RuntimeInstr::Jump { target }
+                | RuntimeInstr::JumpIfZero { target, .. }
+                | RuntimeInstr::JumpIfCmpFalse { target, .. }
+                | RuntimeInstr::Call { target }
+                | RuntimeInstr::ThreadSpawn { target, .. } => Some(target),
+                _ => None,
+            };
+            if let Some(target) = target {
+                *target = remap[*target];
+            }
+        }
+    }
+
     pub(super) fn alloc_slot(&mut self) -> usize {
         let slot = self.slots;
         self.slots += 1;
@@ -4498,6 +4559,36 @@ impl<'a> RuntimeGenericBuilder<'a> {
             });
             self.queue_function(name);
         }
+        let mut preserve = Vec::new();
+        match self.function_return_slots.get(name).and_then(Option::as_ref) {
+            Some(RuntimeFunctionReturnLayout::Scalar { slot, .. }) => preserve.push(*slot),
+            Some(RuntimeFunctionReturnLayout::OwnedFile { fd_slot }) => preserve.push(*fd_slot),
+            Some(RuntimeFunctionReturnLayout::Enum { tag_slot, payload_slots, .. }) => {
+                preserve.push(*tag_slot);
+                preserve.extend(payload_slots);
+            }
+            Some(RuntimeFunctionReturnLayout::Struct { fields, .. }) => {
+                preserve.extend(fields.values().map(|(slot, _)| *slot));
+            }
+            Some(RuntimeFunctionReturnLayout::OwnedStruct { binding }) => {
+                if let RuntimeGenericBinding::OwnedStruct { scalar_fields, list_fields, .. } = binding {
+                    preserve.extend(scalar_fields.values().map(|(slot, _)| *slot));
+                    for field in list_fields.values() {
+                        let (RuntimeOwnedStructListField::Scalar { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot, .. }
+                        | RuntimeOwnedStructListField::Struct { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot, .. }) = field;
+                        preserve.extend([*ptr_slot, *len_slot, *capacity_slot, *allocation_bytes_slot]);
+                    }
+                }
+            }
+            Some(RuntimeFunctionReturnLayout::OwnedListScalar { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot, .. }
+                | RuntimeFunctionReturnLayout::OwnedListStruct { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot, .. }
+                | RuntimeFunctionReturnLayout::OwnedString { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot }
+                | RuntimeFunctionReturnLayout::OwnedMap { ptr_slot, len_slot, capacity_slot, allocation_bytes_slot, .. }) => {
+                preserve.extend([*ptr_slot, *len_slot, *capacity_slot, *allocation_bytes_slot]);
+            }
+            None => {}
+        }
+        self.emit(RuntimeInstr::FrameRestore { preserve });
     }
 
     pub(super) fn capture_enum_return(
@@ -4537,6 +4628,7 @@ impl<'a> RuntimeGenericBuilder<'a> {
         args: &[Expr],
         param_layout: &[RuntimeFunctionParamLayout],
     ) -> RuntimeGenericLowerResult<()> {
+        self.emit(RuntimeInstr::FrameSave);
         for (arg, param) in args.iter().zip(param_layout.iter()) {
             match param {
                 RuntimeFunctionParamLayout::Scalar { ty, slot, .. } => {

@@ -530,6 +530,8 @@ fn rewrite_instruction_operands(
         | RuntimeInstr::CompareSwap { .. }
         | RuntimeInstr::RadixSortFixedInt { .. }
         | RuntimeInstr::Call { .. }
+        | RuntimeInstr::FrameSave
+        | RuntimeInstr::FrameRestore { .. }
         | RuntimeInstr::ThreadSpawn { .. }
         | RuntimeInstr::PrintConst { .. }
         | RuntimeInstr::Return => {}

@@ -981,6 +981,9 @@ impl<'a> RuntimeGenericBuilder<'a> {
                         callee: worker.clone(),
                         span: *worker_span,
                     });
+                    self.emit(RuntimeInstr::FrameRestore {
+                        preserve: vec![handle_slot],
+                    });
                     self.queue_function(worker);
                     self.scopes.insert(
                         name.clone(),
