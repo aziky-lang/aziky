@@ -126,6 +126,6 @@
     "package": "node ./scripts/package-extension.js"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.6.2"
+    "@vscode/vsce": "^4.0.0"
   }
 }
